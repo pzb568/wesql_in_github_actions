@@ -1,4 +1,4 @@
-Name: 启动 WeSQL 数据库
+name: 启动 WeSQL 数据库
 
 on:
   workflow_dispatch:
