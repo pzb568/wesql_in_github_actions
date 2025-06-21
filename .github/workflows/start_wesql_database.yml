@@ -1,4 +1,4 @@
-name: Start WeSQL Database
+Name: 启动 WeSQL 数据库
 
 on:
   workflow_dispatch:
@@ -12,18 +12,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Configure AWS CLI
+      - name: 配置 AWS CLI 以连接 Cloudflare R2
         run: |
-          aws configure set aws_access_key_id ${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}
-          aws configure set aws_secret_access_key ${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}
-          aws configure set default.region ${{ secrets.WESQL_OBJECTSTORE_REGION }}
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws configure set default.region auto # R2没有传统的区域概念，'auto'是常见设置，或者您的Cloudflare账户的默认区域
 
-      - name: Start WeSQL Server
+      - name: 启动 WeSQL 服务器
         run: |
-          export WESQL_OBJECTSTORE_BUCKET=${{ secrets.WESQL_OBJECTSTORE_BUCKET }}
-          export WESQL_OBJECTSTORE_REGION=${{ secrets.WESQL_OBJECTSTORE_REGION }}
-          export WESQL_OBJECTSTORE_ACCESS_KEY=${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}
-          export WESQL_OBJECTSTORE_SECRET_KEY=${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}
+          # WeSQL服务器本身仍然期望类似AWS的环境变量来配置对象存储。
+          # 我们将使用AWS提供商将其指向R2的S3兼容端点。
+          export WESQL_OBJECTSTORE_BUCKET=${{ secrets.R2_BUCKET_NAME }}
+          export WESQL_OBJECTSTORE_REGION=${{ secrets.R2_REGION }} # WeSQL内部可能仍会使用此变量，尽管R2是全球性的。
+          export WESQL_OBJECTSTORE_ACCESS_KEY=${{ secrets.R2_ACCESS_KEY_ID }}
+          export WESQL_OBJECTSTORE_SECRET_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          export WESQL_OBJECTSTORE_ENDPOINT_URL=${{ secrets.R2_ENDPOINT_URL }} # 添加 R2 端点
 
           docker run -itd --network host --name wesql-server \
             -p 3306:3306 \
@@ -38,37 +41,39 @@ jobs:
             repo_objectstore_id='tutorial'\n\
             objectstore_bucket='${WESQL_OBJECTSTORE_BUCKET}'\n\
             objectstore_region='${WESQL_OBJECTSTORE_REGION}'\n\
+            objectstore_endpoint_url='${WESQL_OBJECTSTORE_ENDPOINT_URL}'\n\
             branch_objectstore_id='main'" \
             -v ~/wesql-local-dir:/data/mysql \
             -e WESQL_CLUSTER_MEMBER='127.0.0.1:13306' \
             -e MYSQL_ROOT_PASSWORD=${{ secrets.WESQL_ROOT_PASSWORD }} \
             -e WESQL_OBJECTSTORE_ACCESS_KEY=${WESQL_OBJECTSTORE_ACCESS_KEY} \
             -e WESQL_OBJECTSTORE_SECRET_KEY=${WESQL_OBJECTSTORE_SECRET_KEY} \
+            -e WESQL_OBJECTSTORE_ENDPOINT_URL=${WESQL_OBJECTSTORE_ENDPOINT_URL} \
             apecloud/wesql-server:8.0.35-0.1.0_beta3.38
 
-      - name: Wait for MySQL port
+      - name: 等待 MySQL 端口就绪
         run: |
           for i in {1..60}; do
             if nc -z localhost 3306; then
-              echo "MySQL port 3306 is ready!"
+              echo "MySQL 端口 3306 已就绪！"
               exit 0
             fi
-            echo "Waiting for MySQL port 3306..."
+            echo "等待 MySQL 端口 3306..."
             sleep 5
           done
-          echo "Timeout waiting for MySQL port 3306"
+          echo "等待 MySQL 端口 3306 超时"
           exit 1
 
-      - name: Start and parse Serveo tunnel
+      - name: 启动并解析 Serveo 隧道
         run: |
-          # Start Serveo SSH tunnel for MySQL (port 3306)
+          # 为 MySQL（端口 3306）启动 Serveo SSH 隧道
           nohup ssh -o StrictHostKeyChecking=no -R 0:localhost:3306 serveo.net > serveo.log 2>&1 &
           sleep 5
 
-          # Parse the tunnel information
+          # 解析隧道信息
           TUNNEL_LINE=$(grep 'Forwarding TCP' serveo.log || true)
           if [ -z "$TUNNEL_LINE" ]; then
-            echo "No forwarding line found in serveo.log"
+            echo "serveo.log 中未找到转发行"
             exit 1
           fi
 
@@ -76,20 +81,20 @@ jobs:
           PORT=$(echo "$TUNNEL_LINE" | tr -d '\r' | sed 's/[[:space:]]*$//' | grep -oE '[0-9]+$' || true)
 
           if [ -z "$PORT" ]; then
-            echo "No port found in the forwarding line"
+            echo "转发行中未找到端口"
             exit 1
           fi
 
-          echo "MySQL Public Access:"
-          echo "Host: $HOST"
-          echo "Port: $PORT"
-          echo "Connect: mysql -h $HOST -P $PORT -u root -p"
+          echo "MySQL 公共访问信息："
+          echo "主机: $HOST"
+          echo "端口: $PORT"
+          echo "连接命令: mysql -h $HOST -P $PORT -u root -p"
 
-          # Export HOST and PORT for the next step
+          # 导出 HOST 和 PORT 供下一步使用
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
 
-      - name: Write Connection Info to S3
+      - name: 将连接信息写入 R2
         run: |
           cat << EOF > connection_info.txt
           host=$HOST
@@ -99,13 +104,14 @@ jobs:
           mysql_cli=mysql -h $HOST -P $PORT -u root -p${{ secrets.WESQL_ROOT_PASSWORD }}
           EOF
           
-          aws s3 cp connection_info.txt s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/connection_info.txt
-          echo "Connection properties written to s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/connection_info.txt"
+          # 使用 --endpoint-url 将文件复制到 R2
+          aws s3 cp connection_info.txt s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt --endpoint-url ${{ secrets.R2_ENDPOINT_URL }}
+          echo "连接属性已写入 s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt"
 
-      - name: Keep session running
+      - name: 保持会话运行
         run: |
-          echo "Keep session running"
-          echo "You can review the connection info in the S3 bucket by reading the file connection_info.txt"
-          echo "aws s3 cp s3://wesql-free-test1/connection_info.txt -"
+          echo "保持会话运行"
+          echo "您可以通过读取 connection_info.txt 文件来查看 R2 存储桶中的连接信息"
+          echo "aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt - --endpoint-url ${{ secrets.R2_ENDPOINT_URL }}"
           
           tail -f /dev/null
