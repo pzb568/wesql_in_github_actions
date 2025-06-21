@@ -12,38 +12,46 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 第一步：安装 SSH 客户端（用于 Serveo 隧道）
+      - name: 安装 SSH 客户端
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+      # 第二步：配置 AWS CLI 连接 R2
       - name: 配置 AWS CLI 以连接 Cloudflare R2
         run: |
           aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
           aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws configure set default.region auto # R2没有传统的区域概念，'auto'是常见设置，或者您的Cloudflare账户的默认区域
+          aws configure set default.region auto
 
+      # 第三步：启动 WeSQL 服务器
       - name: 启动 WeSQL 服务器
         run: |
-          # WeSQL服务器本身仍然期望类似AWS的环境变量来配置对象存储。
-          # 我们将使用AWS提供商将其指向R2的S3兼容端点。
+          # 设置对象存储环境变量
           export WESQL_OBJECTSTORE_BUCKET=${{ secrets.R2_BUCKET_NAME }}
-          export WESQL_OBJECTSTORE_REGION=${{ secrets.R2_REGION }} # WeSQL内部可能仍会使用此变量，尽管R2是全球性的。
+          export WESQL_OBJECTSTORE_REGION=${{ secrets.R2_REGION }}
           export WESQL_OBJECTSTORE_ACCESS_KEY=${{ secrets.R2_ACCESS_KEY_ID }}
           export WESQL_OBJECTSTORE_SECRET_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
-          export WESQL_OBJECTSTORE_ENDPOINT_URL=${{ secrets.R2_ENDPOINT_URL }} # 添加 R2 端点
+          export WESQL_OBJECTSTORE_ENDPOINT_URL=${{ secrets.R2_ENDPOINT_URL }}
 
-          docker run -itd --network host --name wesql-server \
+          # 执行 Docker 命令
+          docker run -itd --name wesql-server \
             -p 3306:3306 \
-            -e MYSQL_CUSTOM_CONFIG="[mysqld]\n\
-            port=3306\n\
-            log-bin=binlog\n\
-            gtid_mode=ON\n\
-            enforce_gtid_consistency=ON\n\
-            log_slave_updates=ON\n\
-            binlog_format=ROW\n\
-            objectstore_provider='aws'\n\
-            repo_objectstore_id='tutorial'\n\
-            objectstore_bucket='${WESQL_OBJECTSTORE_BUCKET}'\n\
-            objectstore_region='${WESQL_OBJECTSTORE_REGION}'\n\
-            objectstore_endpoint_url='${WESQL_OBJECTSTORE_ENDPOINT_URL}'\n\
+            -e MYSQL_CUSTOM_CONFIG="[mysqld]
+            port=3306
+            log-bin=binlog
+            gtid_mode=ON
+            enforce_gtid_consistency=ON
+            log_slave_updates=ON
+            binlog_format=ROW
+            objectstore_provider='aws'
+            repo_objectstore_id='tutorial'
+            objectstore_bucket='${WESQL_OBJECTSTORE_BUCKET}'
+            objectstore_region='${WESQL_OBJECTSTORE_REGION}'
+            objectstore_endpoint_url='${WESQL_OBJECTSTORE_ENDPOINT_URL}'
             branch_objectstore_id='main'" \
-            -v ~/wesql-local-dir:/data/mysql \
+            -v wesql-data:/data/mysql \
             -e WESQL_CLUSTER_MEMBER='127.0.0.1:13306' \
             -e MYSQL_ROOT_PASSWORD=${{ secrets.WESQL_ROOT_PASSWORD }} \
             -e WESQL_OBJECTSTORE_ACCESS_KEY=${WESQL_OBJECTSTORE_ACCESS_KEY} \
@@ -51,49 +59,53 @@ jobs:
             -e WESQL_OBJECTSTORE_ENDPOINT_URL=${WESQL_OBJECTSTORE_ENDPOINT_URL} \
             apecloud/wesql-server:8.0.35-0.1.0_beta3.38
 
+      # 第四步：等待 MySQL 端口就绪
       - name: 等待 MySQL 端口就绪
         run: |
           for i in {1..60}; do
-            if nc -z localhost 3306; then
-              echo "MySQL 端口 3306 已就绪！"
+            if docker exec wesql-server mysqladmin ping -u root -p${{ secrets.WESQL_ROOT_PASSWORD }} --silent; then
+              echo "MySQL 已就绪！"
               exit 0
             fi
-            echo "等待 MySQL 端口 3306..."
+            echo "等待 MySQL 启动 ($i/60)..."
             sleep 5
           done
-          echo "等待 MySQL 端口 3306 超时"
+          echo "等待 MySQL 启动超时"
           exit 1
 
+      # 第五步：建立 Serveo 隧道
       - name: 启动并解析 Serveo 隧道
         run: |
-          # 为 MySQL（端口 3306）启动 Serveo SSH 隧道
+          # 启动 SSH 隧道
+          echo "启动 MySQL 隧道（3306）"
           nohup ssh -o StrictHostKeyChecking=no -R 0:localhost:3306 serveo.net > serveo.log 2>&1 &
-          sleep 5
-
+          
+          # 延长等待时间
+          sleep 10
+          
           # 解析隧道信息
-          TUNNEL_LINE=$(grep 'Forwarding TCP' serveo.log || true)
-          if [ -z "$TUNNEL_LINE" ]; then
-            echo "serveo.log 中未找到转发行"
+          TUNNEL_LINE=$(grep -m1 'Forwarding TCP' serveo.log)
+          if [[ -z "$TUNNEL_LINE" ]]; then
+            echo "找不到隧道信息，日志内容："
+            cat serveo.log
             exit 1
           fi
 
-          HOST="serveo.net"
-          PORT=$(echo "$TUNNEL_LINE" | tr -d '\r' | sed 's/[[:space:]]*$//' | grep -oE '[0-9]+$' || true)
-
-          if [ -z "$PORT" ]; then
-            echo "转发行中未找到端口"
-            exit 1
-          fi
+          # 提取公共访问信息
+          HOST_PORT=$(echo "$TUNNEL_LINE" | awk '{print $3}')
+          HOST=$(echo "$HOST_PORT" | cut -d':' -f1)
+          PORT=$(echo "$HOST_PORT" | cut -d':' -f2)
 
           echo "MySQL 公共访问信息："
           echo "主机: $HOST"
           echo "端口: $PORT"
-          echo "连接命令: mysql -h $HOST -P $PORT -u root -p"
+          echo "连接命令: mysql -h $HOST -P $PORT -u root -p${{ secrets.WESQL_ROOT_PASSWORD }}"
 
-          # 导出 HOST 和 PORT 供下一步使用
+          # 存储变量供后续步骤使用
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
 
+      # 第六步：上传连接信息到 R2
       - name: 将连接信息写入 R2
         run: |
           cat << EOF > connection_info.txt
@@ -101,17 +113,19 @@ jobs:
           port=$PORT
           username=root
           password=${{ secrets.WESQL_ROOT_PASSWORD }}
-          mysql_cli=mysql -h $HOST -P $PORT -u root -p${{ secrets.WESQL_ROOT_PASSWORD }}
+          mysql_cli="mysql -h $HOST -P $PORT -u root -p${{ secrets.WESQL_ROOT_PASSWORD }}"
           EOF
-          
-          # 使用 --endpoint-url 将文件复制到 R2
-          aws s3 cp connection_info.txt s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt --endpoint-url ${{ secrets.R2_ENDPOINT_URL }}
-          echo "连接属性已写入 s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt"
 
+          aws s3 cp connection_info.txt s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt \
+            --endpoint-url ${{ secrets.R2_ENDPOINT_URL }}
+          echo "连接属性已写入 R2"
+
+      # 第七步：保持会话存活
       - name: 保持会话运行
         run: |
-          echo "保持会话运行"
-          echo "您可以通过读取 connection_info.txt 文件来查看 R2 存储桶中的连接信息"
-          echo "aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/connection_info.txt - --endpoint-url ${{ secrets.R2_ENDPOINT_URL }}"
-          
-          tail -f /dev/null
+          echo "服务持续运行中..."
+          echo "调试提示：使用 Ctrl+C 停止工作流（注意：超时时间为 6 小时）"
+          while :; do
+            sleep 300
+            echo "[心跳检测] $(date +%Y-%m-%d\ %H:%M:%S)"
+          don
