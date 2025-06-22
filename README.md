@@ -1,33 +1,41 @@
-# Run WeSQL Database In Github Actions
+本项目是在Github Actions中运行WeSQL数据库
+[Cloudflare R2](https://github.com/pzb568/wesql_in_github_actions/blob/main/README.md)的方法说明，可以参考原版[ApeCloud S3](https://github.com/wesql/wesql_in_github_actions/blob/main/README.md)
 
-## Step 1: Create a new repository using this template
+1. 使用此模板创建新存储库
 ![images/s1.png](images/s1.png)
 
-## Step 2: Configure the Secrets needed for the Github Actions
-[start_wesql_database.yml](.github%2Fworkflows%2Fstart_wesql_database.yml) needs the following secrets to be configured in the repository settings:
-- WESQL_OBJECTSTORE_ACCESS_KEY: Access key of the object store
-- WESQL_OBJECTSTORE_SECRET_KEY: Secret key of the object store
-- WESQL_OBJECTSTORE_REGION: Region of the object store
-- WESQL_OBJECTSTORE_BUCKET: Bucket name of the object store
-- WESQL_ROOT_PASSWORD: Root password of the MySQL database
+2. 配置 Github Actions 所需的 Secret
+[start_wesql_database.yml](.github%2Fworkflows%2Fstart_wesql_database.yml) 需要在存储库设置中配置以下密钥：
 
-![images/s2-1.png](images/s2-1.png)
-![images/s2-2.png](images/s2-2.png)
+R2_ACCESS_KEY_ID #r2访问密钥ID 
 
-## Step 3: Trigger the Github Actions
-The [start_wesql_database.yml](.github%2Fworkflows%2Fstart_wesql_database.yml) might be triggered automatically or you can trigger it manually.
-Don't worry about the concurrency, the latest run will cancel the previous run.
+R2_SECRET_ACCESS_KEY #r2机密访问密钥
+ 
+R2_ACCOUNT_ID # Cloudflare账户id 
+ 
+R2_BUCKET_NAME #存储桶的名字如websql
+ 
+R2_REGION auto #r2存储桶地区如auto
+ 
+R2_ENDPOINT_URL #r2存储S3 API地址
+ 
+WESQL_ROOT_PASSWORD # MySQL数据库的root密码
+
+![](https://roim-picx-9xa.pages.dev/rest/88deuUK.jpeg)
+
+
+3. 触发 Github Actions
+[start_wesql_database.yml](.github%2Fworkflows%2Fstart_wesql_database.yml) 可能是自动触发的，您也可以手动触发。不用担心并发性，最近一次运行会取消上一次运行。
 ![images/s3.png](images/s3.png)
 
-## Step 4: Check the Github Actions logs
-You can check the logs of the Github Actions to see the progress.
+4. 检查 Github Actions 日志
 ![images/s4.png](images/s4.png)
 
-## Step 5: Check the WeSQL Database Connection Info
-You can check the connection info of the WeSQL database in the S3 bucket:
+5. 检查 WeSQL 数据库连接信息
+可以查看 S3 存储桶中 WeSQL 数据库的连接信息：
 ![images/s5.png](images/s5.png)
 
-You can also use the following AWS CLI command to get the connection info:
+可以使用以下 AWS CLI 命令获取连接信息：
 
 ```bash
 $ aws s3 cp s3://wesql-free-bucket-1733972419-r4n3/connection_info.txt -
@@ -38,11 +46,10 @@ password=<your-root-password>
 mysql_cli=mysql -h serveo.net -P 40906 -u root -p<your-root-password>
 ```
 
-## Step 6: Connect to the WeSQL Database
+6. 连接到 WeSQL 数据库
 ```bash
 $ mysql -h serveo.net -P 40906 -u root -p<your-root-password>
 ```
 
-## For Free S3 Bucket
-- [ApeCloud S3](https://wesql.io/bucket)
-- [Cloudflare R2](https://developers.cloudflare.com/r2/)
+
+
