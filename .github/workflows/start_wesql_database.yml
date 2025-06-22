@@ -136,8 +136,9 @@ jobs:
           attempt=0
           max_attempts=30
           while [ $attempt -lt $max_attempts ]; do
-            if docker exec wesql-server \
-              mysqladmin ping -u root -p"${{ secrets.WESQL_ROOT_PASSWORD }}" --silent; then
+            # 设置 MYSQL_PWD 环境变量，这样 mysqladmin 会从这里读取密码
+            if docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
+              mysqladmin ping -u root --silent; then
               echo "MySQL 已成功启动"
               exit 0
             fi
@@ -171,10 +172,10 @@ jobs:
           echo "正在建立 SSH 隧道 (本地端口 ${TUNNEL_LOCAL_PORT})..."
           autossh -M 0 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
             -o "ExitOnForwardFailure=yes" -o "StrictHostKeyChecking=no" \
-            -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1
-            
-          sleep 5
-          
+            -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1 & # 后台运行 autossh
+
+          sleep 5 # 等待隧道建立
+
           # 获取隧道信息
           if ! grep -q "Forwarding TCP" serveo.log; then
             echo "::error::SSH 隧道建立失败"
@@ -183,9 +184,13 @@ jobs:
           fi
           
           TUNNEL_INFO=$(grep -m1 "Forwarding TCP" serveo.log)
-          HOST_PORT=$(echo "$TUNNEL_INFO" | awk '{print $NF}')
+          HOST_PORT=$(echo "$TUNNEL_INFO" | awk '{print $NF}') # 例如：some.serveo.net:3306
           echo "公共访问地址: ${HOST_PORT}"
-          echo "HOST_PORT=${HOST_PORT}" >> $GITHUB_ENV
+          
+          # 将主机和端口分别保存为环境变量，以便后续步骤使用
+          echo "HOST=$(echo "${HOST_PORT}" | cut -d':' -f1)" >> $GITHUB_ENV
+          echo "PORT=$(echo "${HOST_PORT}" | cut -d':' -f2)" >> $GITHUB_ENV
+          echo "HOST_PORT=${HOST_PORT}" >> $GITHUB_ENV # 保持这个原始的 HOST_PORT 变量
           
           # 验证隧道
           if ! nc -z $(echo "${HOST_PORT}" | tr ':' ' '); then
@@ -193,33 +198,51 @@ jobs:
             exit 1
           fi
 
+      # ========== 显示连接信息阶段 (新增或修改，更清晰地展示) ==========
+      - name: 显示最终连接信息
+        run: |
+          echo "======================================"
+          echo "         WeSQL 数据库连接信息         "
+          echo "======================================"
+          echo "  主机 (Host):    ${{ env.HOST }}"
+          echo "  端口 (Port):    ${{ env.PORT }}"
+          echo "  用户名 (User):  root"
+          echo "  密码 (Password): ${{ secrets.WESQL_ROOT_PASSWORD }}"
+          echo "--------------------------------------"
+          echo "  完整连接地址: ${HOST_PORT}"
+          echo "======================================"
+          echo "请使用以上信息从您的本地机器连接数据库。"
+          echo "注意：此连接在工作流运行期间有效，最长持续 24 小时。"
+
       # ========== 信息同步阶段 ==========
-      - name: 生成连接信息
+      - name: 生成连接信息文件
         run: |
           cat <<EOF > connection_info.txt
           # WeSQL 数据库连接信息
           [连接参数]
-          主机 = $(echo "$HOST_PORT" | cut -d':' -f1)
-          端口 = $(echo "$HOST_PORT" | cut -d':' -f2)
+          主机 = ${{ env.HOST }}
+          端口 = ${{ env.PORT }}
           用户名 = root
           密码 = ${{ secrets.WESQL_ROOT_PASSWORD }}
           
           [命令行连接]
-          mysql -h ${HOST_PORT%:*} -P ${HOST_PORT#*:} -u root -p'${{ secrets.WESQL_ROOT_PASSWORD }}'
+          mysql -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p'${{ secrets.WESQL_ROOT_PASSWORD }}'
           
           [管理命令]
-          # 保持连接存活
+          # 保持连接存活 (此命令在您的本地终端运行)
           while true; do 
-            mysqladmin ping -h ${HOST_PORT%:*} -u root -p'${{ secrets.WESQL_ROOT_PASSWORD }}' || break
+            mysqladmin ping -h ${{ env.HOST }} -u root -p'${{ secrets.WESQL_ROOT_PASSWORD }}' || break
             sleep 60
           done
           
-          # 容器管理
-          docker logs -f wesql-server
+          # 容器管理 (无法从外部直接运行)
+          # docker logs -f wesql-server 仅在 GitHub Actions 运行器内部有效
           EOF
           
           # 显示连接信息 (安全考虑，密码部分打码)
+          echo "--- connection_info.txt 内容 (密码已屏蔽) ---"
           sed 's/password = .*/password = ********/' connection_info.txt
+          echo "----------------------------------------------"
 
       - name: 上传连接信息到 R2
         timeout-minutes: 3
@@ -230,16 +253,16 @@ jobs:
             exit 1
           fi
           
-          echo "连接信息已安全存储"
+          echo "连接信息已安全存储到 R2 存储桶: s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_$(date +%Y%m%d_%H%M%S).txt"
 
       # ========== 维护阶段 ==========
       - name: 保持服务存活
         timeout-minutes: 1440  # 24小时超时
         run: |
           echo "=== WeSQL 数据库服务运行中 ==="
-          echo "公共访问端点: $HOST_PORT"
-          echo "管理端口: $MANAGEMENT_PORT"
-          echo "隧道本地端口: $TUNNEL_LOCAL_PORT"
+          echo "公共访问端点: ${{ env.HOST_PORT }}"
+          echo "管理端口: ${{ env.MANAGEMENT_PORT }}"
+          echo "隧道本地端口: ${{ env.TUNNEL_LOCAL_PORT }}"
           echo "============================="
           
           # 健康检查循环
@@ -254,17 +277,18 @@ jobs:
             fi
             
             # 检查 MySQL 状态
-            if ! docker exec wesql-server \
-              mysqladmin ping -u root -p"${{ secrets.WESQL_ROOT_PASSWORD }}" --silent; then
+            if ! docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
+              mysqladmin ping -u root --silent; then
               echo "::error::MySQL 无响应"
               docker logs wesql-server --since 5m || true
               exit 1
             fi
             
-            # 检查隧道状态
-            if ! netstat -tuln | grep -q "$TUNNEL_LOCAL_PORT"; then
-              echo "::warning::SSH 隧道异常，尝试重新建立..."
-              echo "请手动检查或根据实际需求在 .github/scripts/reconnect_tunnel.sh 中实现重连逻辑"
+            # 检查隧道状态 (注意：autossh 应该会自动重连，这里更多是监控)
+            if ! netstat -tuln | grep -q "${{ env.TUNNEL_LOCAL_PORT }}"; then
+              echo "::warning::SSH 隧道本地端口 (${{ env.TUNNEL_LOCAL_PORT }}) 监听异常。autossh 应该会尝试重连。"
+              # 如果 autossh 真的失效，这个工作流可能会因为连接问题而“静默”失败，
+              # 或者在下一次 MySQL 健康检查时由于隧道不通而报错。
             fi
             
             # 资源监控
