@@ -49,10 +49,13 @@ jobs:
             openssh-client \
             lsof \
             net-tools \
-            awscli \
-            docker.io
+            docker.io \
+            python3-pip # 添加 python3-pip 以便安装 pip
           
           sudo systemctl start docker
+          
+          # 使用 pip3 安装 awscli
+          pip3 install awscli
 
       - name: 配置 AWS CLI
         run: |
@@ -260,20 +263,18 @@ jobs:
             # 检查隧道状态
             if ! netstat -tuln | grep -q "$TUNNEL_LOCAL_PORT"; then
               echo "::warning::SSH 隧道异常，尝试重新建立..."
-              # 请确保在 .github/scripts/reconnect_tunnel.sh 中有重新建立隧道的逻辑
-              # 例如：您可以尝试在此处重新运行 ssh_tunnel 步骤中的 autossh 命令
-              # 注意：直接在这里调用外部脚本需要确保其存在且可执行
-              # 简单的处理可以是：
+              # 请注意：这里只是一个警告，如果需要自动重连 SSH 隧道，
+              # 完整的逻辑可能需要更复杂的脚本或依赖 autossh 的自动重连能力。
+              # 对于 GitHub Actions，如果隧道断开导致服务不可用，通常会让整个 workflow 失败并根据需要重试。
+              # 如果确实需要在此处触发重连，你需要一个像 .github/scripts/reconnect_tunnel.sh 这样的外部脚本，
+              # 并且该脚本需要包含重新建立隧道的命令。
+              # 例如，您可以尝试在脚本中包含：
               # pkill -f "autossh" || true # 杀死旧隧道
               # autossh -M 0 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
               #   -o "ExitOnForwardFailure=yes" -o "StrictHostKeyChecking=no" \
               #   -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1 &
               # sleep 5
-              # if ! grep -q "Forwarding TCP" serveo.log; then echo "::error::SSH 隧道重建失败"; fi
-              
-              # 由于在 '保持服务存活' 步骤中直接重新执行复杂的隧道建立逻辑可能很复杂且不理想，
-              # 更常见的做法是让 'autossh' 自己处理重连，或者如果隧道真的断了，让整个 workflow 失败并重试。
-              # 这里我们只是打印警告。
+              # if ! grep -q "Forwarding TCP" serveo.log; then echo "::error::SSH 隧道重建失败"; exit 1; fi
               echo "请手动检查或根据实际需求在 .github/scripts/reconnect_tunnel.sh 中实现重连逻辑"
             fi
             
