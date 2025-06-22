@@ -26,10 +26,15 @@ jobs:
           )
           
           missing_secrets=()
-          for secret in "${required_secrets[@]}"; do
-            if [ -z "${{ secrets[secret] }}" ]; then
-              missing_secrets+=("$secret")
-            fi
+          for secret_name in "${required_secrets[@]}"; do
+            case "$secret_name" in
+              "WESQL_ROOT_PASSWORD") if [ -z "${{ secrets.WESQL_ROOT_PASSWORD }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+              "R2_ACCESS_KEY_ID") if [ -z "${{ secrets.R2_ACCESS_KEY_ID }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+              "R2_SECRET_ACCESS_KEY") if [ -z "${{ secrets.R2_SECRET_ACCESS_KEY }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+              "R2_BUCKET_NAME") if [ -z "${{ secrets.R2_BUCKET_NAME }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+              "R2_ENDPOINT_URL") if [ -z "${{ secrets.R2_ENDPOINT_URL }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+              "R2_REGION") if [ -z "${{ secrets.R2_REGION }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+            esac
           done
           
           if [ ${#missing_secrets[@]} -gt 0 ]; then
@@ -255,7 +260,21 @@ jobs:
             # 检查隧道状态
             if ! netstat -tuln | grep -q "$TUNNEL_LOCAL_PORT"; then
               echo "::warning::SSH 隧道异常，尝试重新建立..."
-              $GITHUB_WORKSPACE/.github/scripts/reconnect_tunnel.sh || true
+              # 请确保在 .github/scripts/reconnect_tunnel.sh 中有重新建立隧道的逻辑
+              # 例如：您可以尝试在此处重新运行 ssh_tunnel 步骤中的 autossh 命令
+              # 注意：直接在这里调用外部脚本需要确保其存在且可执行
+              # 简单的处理可以是：
+              # pkill -f "autossh" || true # 杀死旧隧道
+              # autossh -M 0 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
+              #   -o "ExitOnForwardFailure=yes" -o "StrictHostKeyChecking=no" \
+              #   -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1 &
+              # sleep 5
+              # if ! grep -q "Forwarding TCP" serveo.log; then echo "::error::SSH 隧道重建失败"; fi
+              
+              # 由于在 '保持服务存活' 步骤中直接重新执行复杂的隧道建立逻辑可能很复杂且不理想，
+              # 更常见的做法是让 'autossh' 自己处理重连，或者如果隧道真的断了，让整个 workflow 失败并重试。
+              # 这里我们只是打印警告。
+              echo "请手动检查或根据实际需求在 .github/scripts/reconnect_tunnel.sh 中实现重连逻辑"
             fi
             
             # 资源监控
@@ -275,5 +294,5 @@ jobs:
           docker stop wesql-server || true
           docker rm wesql-server || true
           docker volume rm wesql-data || true
-          pkill -f "autossh" || true
+          pkill -f "autossh" || true # 杀死 autossh 进程
           echo "清理完成"
