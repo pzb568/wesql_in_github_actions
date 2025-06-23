@@ -46,7 +46,7 @@ jobs:
       - name: 安装必要工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-client lsof net-tools python3-pip
+          sudo apt-get install -y openssh-client lsof net-tools python3-pip wget
           pip3 install awscli
 
       - name: 配置 AWS CLI
@@ -100,7 +100,7 @@ jobs:
             -e WESQL_OBJECTSTORE_REGION="auto" \
             -e WESQL_OBJECTSTORE_REPO_ID="tutorial" \
             -e WESQL_OBJECTSTORE_BRANCH_ID="main" \
-            apecloud/wesql-server:8.0.35
+            apecloud/wesql-server:8.0.36
 
           echo "等待容器初始化..."
           sleep 20
@@ -122,7 +122,7 @@ jobs:
           docker logs wesql-server
           exit 1
 
-      # ========== Cloudflare Tunnel 替代 SSH 隧道 ==========
+      # ========== 使用 Cloudflare Tunnel 暴露端口 ==========
       - name: 使用 Cloudflare Tunnel 暴露 MySQL 端口
         id: cloudflared
         run: |
@@ -143,7 +143,7 @@ jobs:
           echo "HOST=$(echo $CF_URL | cut -d'/' -f3 | cut -d':' -f1)" >> $GITHUB_ENV
           echo "PORT=$(echo $CF_URL | cut -d':' -f3)" >> $GITHUB_ENV
 
-      # ========== 信息输出阶段 ==========
+      # ========== 生成连接信息并上传 ==========
       - name: 生成连接信息
         run: |
           cat > connection_info.txt <<EOF
