@@ -22,8 +22,6 @@ jobs:
             "R2_SECRET_ACCESS_KEY"
             "R2_BUCKET_NAME"
             "R2_ENDPOINT_URL"
-            # R2 通常不需要显式区域，但如果您的 WeSQL 配置需要一个占位符，可以保留
-            # "R2_REGION" 
           )
           
           missing_secrets=()
@@ -34,7 +32,6 @@ jobs:
               "R2_SECRET_ACCESS_KEY") if [ -z "${{ secrets.R2_SECRET_ACCESS_KEY }}" ]; then missing_secrets+=("$secret_name"); fi ;;
               "R2_BUCKET_NAME") if [ -z "${{ secrets.R2_BUCKET_NAME }}" ]; then missing_secrets+=("$secret_name"); fi ;;
               "R2_ENDPOINT_URL") if [ -z "${{ secrets.R2_ENDPOINT_URL }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-              #"R2_REGION") if [ -z "${{ secrets.R2_REGION }}" ]; then missing_secrets+=("$secret_name"); fi ;; # R2 区域通常不是必需的
             esac
           done
           
@@ -63,10 +60,10 @@ jobs:
           aws configure set aws_access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}"
           aws configure set aws_secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}"
           # R2 通常没有明确的“区域”概念，但 AWS CLI 可能需要一个默认值。
-          # 您可以设置一个占位符，或如果您的 R2 API 不强制要求，也可以不设置。
-          aws configure set default.region "auto" # 或者任何一个占位符，如 us-east-1
+          aws configure set default.region "auto" 
           aws configure set default.s3.signature_version s3v4
-          aws configure set default.s3.endpoint_url "${{ secrets.R2_ENDPOINT_URL }}" # 重点：指定 R2 端点
+          # 关键：指定 R2 端点，确保 awscli 命令指向 R2
+          aws configure set default.s3.endpoint_url "${{ secrets.R2_ENDPOINT_URL }}" 
 
       # ========== 容器管理阶段 ==========
       - name: 清理旧容器
@@ -88,14 +85,14 @@ jobs:
           enforce_gtid_consistency=ON
           log_slave_updates=ON
           binlog_format=ROW
-          # 修改这里：将 objectstore_provider 设置为 s3
-          # WeSQL 对 R2 的支持通常通过 S3 兼容模式实现，因此这里设置为 s3
+          # 关键：将 objectstore_provider 设置为 s3 以兼容 R2
           objectstore_provider=s3 
           repo_objectstore_id=tutorial
           objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
-          # R2 通常不需要 region，但如果 WeSQL 强制，可以使用一个占位符，或者根据 WeSQL 文档确认
-          objectstore_region=auto # 或者留空，或者根据 WeSQL 对 R2 的特定要求设置
-          objectstore_endpoint_url=${{ secrets.R2_ENDPOINT_URL }} # 重点：指定 R2 的端点 URL
+          # R2 通常不需要 region，这里使用一个占位符 'auto'
+          objectstore_region=auto 
+          # 关键：指定 R2 的端点 URL
+          objectstore_endpoint_url=${{ secrets.R2_ENDPOINT_URL }} 
           branch_objectstore_id=main
           EOF
 
@@ -108,23 +105,20 @@ jobs:
           MANAGEMENT_PORT=$(( 20000 + ( RANDOM % 1000 ) ))
           echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
           
+          # 修复 docker run 命令语法：确保镜像名称紧跟在最后一个参数之后，无反斜杠
           if ! docker run -d \
             --name wesql-server \
             --restart unless-stopped \
             -p 3306:3306 \
             -p ${MANAGEMENT_PORT}:13306 \
             -v wesql-data:/data/mysql \
-            -v $(pwd)/mysql_custom.cnf:/etc/mysql/conf.d/custom.cnf \
+            -v "$(pwd)/mysql_custom.cnf:/etc/mysql/conf.d/custom.cnf" \
             -e WESQL_CLUSTER_MEMBER="127.0.0.1:${MANAGEMENT_PORT}" \
             -e MYSQL_ROOT_PASSWORD="${{ secrets.WESQL_ROOT_PASSWORD }}" \
             -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY_ID }}" \
             -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
             -e WESQL_OBJECTSTORE_ENDPOINT_URL="${{ secrets.R2_ENDPOINT_URL }}" \
-            # 由于在 custom.cnf 中设置了 provider 和 endpoint，这里可以移除这些环境变量的显式设置
-            # 如果 custom.cnf 不生效，则这些环境变量仍是兜底方案，但通常 custom.cnf 优先
-            # -e WESQL_OBJECTSTORE_PROVIDER="s3" # 如果通过 custom.cnf 配置，这里可以移除
-            # -e WESQL_OBJECTSTORE_REGION="auto" # 如果通过 custom.cnf 配置，这里可以移除
-            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then
+            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then # <--- 这里没有反斜杠了，镜像名称直接跟在后面
             echo "::error::容器启动失败"
             docker logs wesql-server || true
             exit 1
@@ -301,4 +295,3 @@ jobs:
           docker volume rm wesql-data || true
           pkill -f "autossh" || true 
           echo "清理完成"
-
