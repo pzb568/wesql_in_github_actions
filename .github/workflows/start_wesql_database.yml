@@ -77,6 +77,7 @@ jobs:
 
       - name: 准备 MySQL 配置
         run: |
+          # 注意：移除了 objectstore_provider=s3，该配置通过环境变量传递
           cat > mysql_custom.cnf <<EOF
           [mysqld]
           port=3306
@@ -85,7 +86,6 @@ jobs:
           enforce_gtid_consistency=ON
           log_slave_updates=ON
           binlog_format=ROW
-          # 移除了 objectstore_provider=s3，该配置通过环境变量传递
           repo_objectstore_id=tutorial
           objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
           objectstore_region=auto 
@@ -102,7 +102,7 @@ jobs:
           MANAGEMENT_PORT=$(( 20000 + ( RANDOM % 1000 ) ))
           echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
           
-          # 确保镜像名称紧跟在最后一个参数之后，无反斜杠
+          # 核心修复：确保 docker run 命令语法完全正确，特别是换行符和注释
           if ! docker run -d \
             --name wesql-server \
             --restart unless-stopped \
@@ -115,8 +115,8 @@ jobs:
             -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY_ID }}" \
             -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
             -e WESQL_OBJECTSTORE_ENDPOINT_URL="${{ secrets.R2_ENDPOINT_URL }}" \
-            -e WESQL_OBJECTSTORE_PROVIDER=s3 \ # <--- 确保此环境变量存在
-            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then
+            -e WESQL_OBJECTSTORE_PROVIDER=s3 \ # 这一行末尾有反斜杠 \
+            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then # 镜像名称在此行，且行末无反斜杠
             echo "::error::容器启动失败"
             docker logs wesql-server || true
             exit 1
