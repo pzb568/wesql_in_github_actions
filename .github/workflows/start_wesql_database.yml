@@ -1,4 +1,4 @@
-name: 构建并启动 WeSQL 数据库
+Name: 构建并启动 WeSQL 数据库
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   build_and_deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 60 # 整个作业的超时时间，足够完成构建和启动
 
     steps:
       - name: 检查必要 Secrets
@@ -60,12 +60,14 @@ jobs:
 
       - name: 清理旧容器
         run: |
+          # 停止并移除可能存在的同名容器和卷
           docker stop wesql-server || true
           docker rm -f wesql-server || true
           docker volume rm wesql-data || true
 
       - name: 准备 MySQL 配置
         run: |
+          # 创建自定义的 MySQL 配置文件
           cat > mysql_custom.cnf <<EOF
           [mysqld]
           port=3306
@@ -78,9 +80,11 @@ jobs:
 
       - name: 启动 WeSQL 容器
         run: |
+          # 查找一个可用的管理端口
           MANAGEMENT_PORT=$(comm -23 <(seq 20000 30000 | sort) <(ss -tan | awk '{print $4}' | cut -d':' -f2 | sort -u) | shuf | head -n1)
-          echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
+          echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV # 将端口保存为环境变量供后续步骤使用
 
+          # 启动 WeSQL Docker 容器
           docker run -d \
             --name wesql-server \
             --restart unless-stopped \
@@ -101,27 +105,28 @@ jobs:
             custom-wesql-server
 
           echo "等待容器初始化..."
-          sleep 20
-          docker logs wesql-server --tail 50
+          sleep 20 # 给予容器一些时间进行初步启动
+          docker logs wesql-server --tail 50 # 显示最新的容器日志
 
       - name: 等待 MySQL 启动
-        timeout-minutes: 5
+        timeout-minutes: 5 # 最多等待 5 分钟
         run: |
-          for i in {1..30}; do
+          for i in {1..30}; do # 尝试 30 次，每次间隔 5 秒
             if docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
               mysqladmin ping -u root --silent; then
               echo "MySQL 已成功启动"
-              exit 0
+              exit 0 # MySQL 启动成功，退出循环
             fi
             echo "等待MySQL启动(${i}/30)..."
             sleep 5
           done
-          echo "::error::MySQL 启动超时"
-          docker logs wesql-server
+          echo "::error::MySQL 启动超时" # 如果循环结束 MySQL 仍未启动，则报错
+          docker logs wesql-server # 打印容器日志以帮助调试
           exit 1
 
       - name: 生成连接信息
         run: |
+          # 创建包含连接信息的文件
           cat > connection_info.txt <<EOF
           ========================
           WeSQL 数据库连接信息
@@ -132,30 +137,27 @@ jobs:
           密码: [保密]
           管理端口: ${{ env.MANAGEMENT_PORT }}
           ------------------------
-          有效期: 6小时
+          注意: 此数据库实例仅在GitHub Actions作业运行期间存在，作业完成后将销毁。
           ========================
           EOF
-          cat connection_info.txt
+          cat connection_info.txt # 在日志中显示连接信息
 
       - name: 上传连接信息到R2
         run: |
+          # 将连接信息文件上传到 R2 存储桶
           aws s3 cp connection_info.txt "s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_$(date +%s).txt"
 
-      - name: 保持服务运行
-        timeout-minutes: 360
-        run: |
-          echo "服务已启动，将持续运行6小时"
-          while true; do
-            if ! docker ps | grep -q wesql-server; then
-              echo "::error::容器异常停止"
-              exit 1
-            fi
-            sleep 60
-          done
+      # 移除了 '保持服务运行' 步骤。
+      # GitHub Actions 不适合作为长期运行服务的托管平台。
+      # 一旦数据库成功启动并其状态得到验证，此作业即完成。
+      # 如果需要持久化的数据库实例，请考虑将其部署到专用服务器或云服务。
 
       - name: 清理资源
-        if: always()
+        if: always() # 确保此步骤总是在作业结束时运行，无论之前的步骤是否成功
         run: |
-          docker stop wesql-server || true
-          docker rm -f wesql-server || true
-          docker volume rm wesql-data || true
+          echo "清理 Docker 资源..."
+          docker stop wesql-server || true # 停止容器，如果不存在则忽略错误
+          docker rm -f wesql-server || true # 强制删除容器
+          docker volume rm wesql-data || true # 删除数据卷
+          echo "资源清理完毕。"
+
