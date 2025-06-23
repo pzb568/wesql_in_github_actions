@@ -85,13 +85,10 @@ jobs:
           enforce_gtid_consistency=ON
           log_slave_updates=ON
           binlog_format=ROW
-          # 关键：将 objectstore_provider 设置为 s3 以兼容 R2
-          objectstore_provider=s3 
+          # 移除了 objectstore_provider=s3，该配置通过环境变量传递
           repo_objectstore_id=tutorial
           objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
-          # R2 通常不需要 region，这里使用一个占位符 'auto'
           objectstore_region=auto 
-          # 关键：指定 R2 的端点 URL
           objectstore_endpoint_url=${{ secrets.R2_ENDPOINT_URL }} 
           branch_objectstore_id=main
           EOF
@@ -105,7 +102,7 @@ jobs:
           MANAGEMENT_PORT=$(( 20000 + ( RANDOM % 1000 ) ))
           echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
           
-          # 修复 docker run 命令语法：确保镜像名称紧跟在最后一个参数之后，无反斜杠
+          # 确保镜像名称紧跟在最后一个参数之后，无反斜杠
           if ! docker run -d \
             --name wesql-server \
             --restart unless-stopped \
@@ -118,7 +115,8 @@ jobs:
             -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY_ID }}" \
             -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
             -e WESQL_OBJECTSTORE_ENDPOINT_URL="${{ secrets.R2_ENDPOINT_URL }}" \
-            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then # <--- 这里没有反斜杠了，镜像名称直接跟在后面
+            -e WESQL_OBJECTSTORE_PROVIDER=s3 \ # <--- 确保此环境变量存在
+            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then
             echo "::error::容器启动失败"
             docker logs wesql-server || true
             exit 1
