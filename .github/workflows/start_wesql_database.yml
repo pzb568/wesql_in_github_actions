@@ -84,6 +84,7 @@ jobs:
       - name: 准备 MySQL 配置
         run: |
           set -e
+          # 仅包含 MySQL 核心配置，移除所有对象存储相关配置
           cat > mysql_custom.cnf <<EOF
           [mysqld]
           port=3306
@@ -92,10 +93,11 @@ jobs:
           enforce_gtid_consistency=ON
           log_slave_updates=ON
           binlog_format=ROW
-          repo_objectstore_id=tutorial
-          objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
-          objectstore_region=auto
-          branch_objectstore_id=main
+          # ！！！已移除以下行，现在通过环境变量传递这些配置！！！
+          # repo_objectstore_id=tutorial
+          # objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
+          # objectstore_region=auto
+          # branch_objectstore_id=main
           EOF
 
       - name: 启动 WeSQL 服务器
@@ -120,6 +122,10 @@ jobs:
             -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
             -e WESQL_OBJECTSTORE_ENDPOINT_URL="${{ secrets.R2_ENDPOINT_URL }}" \
             -e WESQL_OBJECTSTORE_PROVIDER=s3 \
+            -e WESQL_OBJECTSTORE_BUCKET="${{ secrets.R2_BUCKET_NAME }}" \
+            -e WESQL_OBJECTSTORE_REGION="auto" \
+            -e WESQL_OBJECTSTORE_REPO_ID="tutorial" \
+            -e WESQL_OBJECTSTORE_BRANCH_ID="main" \
             apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then
             echo "::error::容器启动失败"
             docker logs wesql-server || true # 打印容器日志以便调试
@@ -132,6 +138,32 @@ jobs:
           echo "========== 初始日志 (最后100行) =========="
           docker logs wesql-server --tail 100 # 打印容器的最新日志
           echo "========================================"
+
+      # ========== 调试步骤：检查容器内部配置 ==========
+      - name: 调试 WeSQL 容器环境变量
+        # 即使容器启动失败，也尝试运行此步骤以获取调试信息
+        if: always 
+        run: |
+          echo "等待容器稳定以便调试..."
+          # 给容器更多时间来稳定，特别是如果它正在重启
+          sleep 30 
+          echo "执行 'env' 命令在容器内部，过滤 WeSQL 对象存储相关变量..."
+          # 检查容器内部的环境变量是否正确传入
+          docker exec wesql-server env | grep WESQL_OBJECTSTORE_ || echo "未能grep WESQL_OBJECTSTORE_相关的环境变量"
+          
+          echo "执行 'cat /etc/mysql/conf.d/custom.cnf' 在容器内部..."
+          # 检查 custom.cnf 是否按预期只包含核心 MySQL 配置
+          docker exec wesql-server cat /etc/mysql/conf.d/custom.cnf || echo "未能cat /etc/mysql/conf.d/custom.cnf"
+          
+          echo "执行 'cat /etc/my.cnf' 在容器内部..."
+          # 检查主要的 my.cnf 是否存在并被正确加载
+          docker exec wesql-server cat /etc/my.cnf || echo "未能cat /etc/my.cnf"
+          
+          echo "执行 'ps aux' 在容器内部..."
+          # 检查容器内部的进程列表，看 WeSQL 进程是否在运行
+          docker exec wesql-server ps aux || echo "未能执行 ps aux"
+          
+          echo "========== 调试信息结束 =========="
 
       # ========== 健康检查阶段 ==========
       - name: 等待 MySQL 启动
@@ -192,13 +224,13 @@ jobs:
           
           if ! pgrep -f autossh >/dev/null; then
             echo "::error::autossh 进程未运行"
-            cat serveo.log # 打印 autossh 日志
+            cat serveo.log
             exit 1
           fi
           
           if ! grep -q "Forwarding TCP" serveo.log; then
             echo "::error::SSH 隧道建立失败"
-            cat serveo.log # 打印 autossh 日志
+            cat serveo.log
             exit 1
           fi
           
