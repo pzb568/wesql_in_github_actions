@@ -79,12 +79,8 @@ jobs:
         timeout-minutes: 10
         run: |
           set -ex
-          # 使用更宽的端口范围以降低冲突风险
-          MANAGEMENT_PORT=$(( 20000 + RANDOM % 40000 ))
-          if lsof -i :$MANAGEMENT_PORT >/dev/null; then
-            echo "::error::端口 $MANAGEMENT_PORT 已占用"
-            exit 1
-          fi
+          # 使用更可靠的端口选择方法
+          MANAGEMENT_PORT=$(comm -23 <(seq 20000 30000 | sort) <(ss -tan | awk '{print $4}' | cut -d':' -f2 | sort -u) | shuf | head -n1)
           echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
           
           docker run -d \
@@ -104,7 +100,7 @@ jobs:
             -e WESQL_OBJECTSTORE_REGION="auto" \
             -e WESQL_OBJECTSTORE_REPO_ID="tutorial" \
             -e WESQL_OBJECTSTORE_BRANCH_ID="main" \
-            apecloud/wesql-server:8.0.35 # 使用稳定版本
+            apecloud/wesql-server:8.0.35
           
           echo "容器已启动，等待初始化..."
           sleep 15
@@ -150,11 +146,7 @@ jobs:
         timeout-minutes: 5
         run: |
           set -e
-          TUNNEL_LOCAL_PORT=$(( 30000 + RANDOM % 30000 ))
-          if lsof -i :$TUNNEL_LOCAL_PORT >/dev/null; then
-            echo "::error::端口 $TUNNEL_LOCAL_PORT 已占用"
-            exit 1
-          fi
+          TUNNEL_LOCAL_PORT=$(comm -23 <(seq 30000 40000 | sort) <(ss -tan | awk '{print $4}' | cut -d':' -f2 | sort -u) | shuf | head -n1)
           echo "TUNNEL_LOCAL_PORT=${TUNNEL_LOCAL_PORT}" >> $GITHUB_ENV
           
           sudo apt-get install -y autossh
@@ -219,9 +211,7 @@ jobs:
         run: |
           set -e
           TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
-          R2_FILE="/="
-
-s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_${TIMESTAMP}.txt"
+          R2_FILE="s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_${TIMESTAMP}.txt"
           aws s3 cp connection_info.txt "$R2_FILE"
           echo "已上传至: $R2_FILE"
 
