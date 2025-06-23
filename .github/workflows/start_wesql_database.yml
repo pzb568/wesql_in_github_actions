@@ -70,7 +70,6 @@ jobs:
           aws configure set default.s3.signature_version s3v4
           aws configure set default.s3.endpoint_url "${{ secrets.R2_ENDPOINT_URL }}"
 
-      # ========== 容器管理阶段 ==========
       - name: 清理旧容器
         run: |
           set -e
@@ -142,7 +141,7 @@ jobs:
       # ========== 调试步骤：检查容器内部配置 ==========
       - name: 调试 WeSQL 容器环境变量
         # 即使容器启动失败，也尝试运行此步骤以获取调试信息
-        if: always 
+        if: always() 
         run: |
           echo "等待容器稳定以便调试..."
           # 给容器更多时间来稳定，特别是如果它正在重启
