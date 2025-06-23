@@ -22,7 +22,8 @@ jobs:
             "R2_SECRET_ACCESS_KEY"
             "R2_BUCKET_NAME"
             "R2_ENDPOINT_URL"
-            "R2_REGION"
+            # R2 通常不需要显式区域，但如果您的 WeSQL 配置需要一个占位符，可以保留
+            # "R2_REGION" 
           )
           
           missing_secrets=()
@@ -33,7 +34,7 @@ jobs:
               "R2_SECRET_ACCESS_KEY") if [ -z "${{ secrets.R2_SECRET_ACCESS_KEY }}" ]; then missing_secrets+=("$secret_name"); fi ;;
               "R2_BUCKET_NAME") if [ -z "${{ secrets.R2_BUCKET_NAME }}" ]; then missing_secrets+=("$secret_name"); fi ;;
               "R2_ENDPOINT_URL") if [ -z "${{ secrets.R2_ENDPOINT_URL }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-              "R2_REGION") if [ -z "${{ secrets.R2_REGION }}" ]; then missing_secrets+=("$secret_name"); fi ;;
+              #"R2_REGION") if [ -z "${{ secrets.R2_REGION }}" ]; then missing_secrets+=("$secret_name"); fi ;; # R2 区域通常不是必需的
             esac
           done
           
@@ -49,21 +50,23 @@ jobs:
             openssh-client \
             lsof \
             net-tools \
-            python3-pip # 移除了 docker.io 的安装，因为它通常已预装并可能导致冲突
+            python3-pip 
           
-          # 确保 Docker 服务已启动。GitHub Actions 运行器通常已预装 Docker。
-          sudo systemctl start docker || true # 使用 || true 确保即使已启动也不会因错误而停止步骤
-          sudo systemctl enable docker # 确保 Docker 服务被设置为启动时运行
+          sudo systemctl start docker || true 
+          sudo systemctl enable docker 
           
-          # 使用 pip3 安装 awscli
           pip3 install awscli
 
       - name: 配置 AWS CLI
         run: |
+          # AWS CLI 配置，用于与 R2 交互。R2 使用 S3 兼容 API。
           aws configure set aws_access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}"
           aws configure set aws_secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}"
-          aws configure set default.region "${{ secrets.R2_REGION }}"
+          # R2 通常没有明确的“区域”概念，但 AWS CLI 可能需要一个默认值。
+          # 您可以设置一个占位符，或如果您的 R2 API 不强制要求，也可以不设置。
+          aws configure set default.region "auto" # 或者任何一个占位符，如 us-east-1
           aws configure set default.s3.signature_version s3v4
+          aws configure set default.s3.endpoint_url "${{ secrets.R2_ENDPOINT_URL }}" # 重点：指定 R2 端点
 
       # ========== 容器管理阶段 ==========
       - name: 清理旧容器
@@ -85,11 +88,14 @@ jobs:
           enforce_gtid_consistency=ON
           log_slave_updates=ON
           binlog_format=ROW
-          objectstore_provider=aws
+          # 修改这里：将 objectstore_provider 设置为 s3
+          # WeSQL 对 R2 的支持通常通过 S3 兼容模式实现，因此这里设置为 s3
+          objectstore_provider=s3 
           repo_objectstore_id=tutorial
           objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
-          objectstore_region=${{ secrets.R2_REGION }}
-          objectstore_endpoint_url=${{ secrets.R2_ENDPOINT_URL }}
+          # R2 通常不需要 region，但如果 WeSQL 强制，可以使用一个占位符，或者根据 WeSQL 文档确认
+          objectstore_region=auto # 或者留空，或者根据 WeSQL 对 R2 的特定要求设置
+          objectstore_endpoint_url=${{ secrets.R2_ENDPOINT_URL }} # 重点：指定 R2 的端点 URL
           branch_objectstore_id=main
           EOF
 
@@ -99,7 +105,6 @@ jobs:
         run: |
           set -x
           
-          # 生成随机本地管理端口
           MANAGEMENT_PORT=$(( 20000 + ( RANDOM % 1000 ) ))
           echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
           
@@ -115,6 +120,10 @@ jobs:
             -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY_ID }}" \
             -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
             -e WESQL_OBJECTSTORE_ENDPOINT_URL="${{ secrets.R2_ENDPOINT_URL }}" \
+            # 由于在 custom.cnf 中设置了 provider 和 endpoint，这里可以移除这些环境变量的显式设置
+            # 如果 custom.cnf 不生效，则这些环境变量仍是兜底方案，但通常 custom.cnf 优先
+            # -e WESQL_OBJECTSTORE_PROVIDER="s3" # 如果通过 custom.cnf 配置，这里可以移除
+            # -e WESQL_OBJECTSTORE_REGION="auto" # 如果通过 custom.cnf 配置，这里可以移除
             apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then
             echo "::error::容器启动失败"
             docker logs wesql-server || true
@@ -124,7 +133,6 @@ jobs:
           echo "容器已启动，等待初始化..."
           sleep 15
           
-          # 捕获初始日志
           echo "========== 初始日志 (最后100行) =========="
           docker logs wesql-server --tail 100
           echo "========================================"
@@ -136,7 +144,6 @@ jobs:
           attempt=0
           max_attempts=30
           while [ $attempt -lt $max_attempts ]; do
-            # 设置 MYSQL_PWD 环境变量，这样 mysqladmin 会从这里读取密码
             if docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
               mysqladmin ping -u root --silent; then
               echo "MySQL 已成功启动"
@@ -161,22 +168,18 @@ jobs:
         id: ssh_tunnel
         timeout-minutes: 5
         run: |
-          # 生成随机本地端口
           TUNNEL_LOCAL_PORT=$(( 30000 + ( RANDOM % 1000 ) ))
           echo "TUNNEL_LOCAL_PORT=${TUNNEL_LOCAL_PORT}" >> $GITHUB_ENV
           
-          # 安装自动重连的 SSH 工具
           sudo apt-get install -y autossh
           
-          # 建立隧道 (使用 autossh 自动重连)
           echo "正在建立 SSH 隧道 (本地端口 ${TUNNEL_LOCAL_PORT})..."
           autossh -M 0 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
             -o "ExitOnForwardFailure=yes" -o "StrictHostKeyChecking=no" \
-            -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1 & # 后台运行 autossh
+            -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1 & 
 
-          sleep 5 # 等待隧道建立
+          sleep 5 
 
-          # 获取隧道信息
           if ! grep -q "Forwarding TCP" serveo.log; then
             echo "::error::SSH 隧道建立失败"
             cat serveo.log
@@ -184,21 +187,19 @@ jobs:
           fi
           
           TUNNEL_INFO=$(grep -m1 "Forwarding TCP" serveo.log)
-          HOST_PORT=$(echo "$TUNNEL_INFO" | awk '{print $NF}') # 例如：some.serveo.net:3306
+          HOST_PORT=$(echo "$TUNNEL_INFO" | awk '{print $NF}') 
           echo "公共访问地址: ${HOST_PORT}"
           
-          # 将主机和端口分别保存为环境变量，以便后续步骤使用
           echo "HOST=$(echo "${HOST_PORT}" | cut -d':' -f1)" >> $GITHUB_ENV
           echo "PORT=$(echo "${HOST_PORT}" | cut -d':' -f2)" >> $GITHUB_ENV
-          echo "HOST_PORT=${HOST_PORT}" >> $GITHUB_ENV # 保持这个原始的 HOST_PORT 变量
+          echo "HOST_PORT=${HOST_PORT}" >> $GITHUB_ENV 
           
-          # 验证隧道
           if ! nc -z $(echo "${HOST_PORT}" | tr ':' ' '); then
             echo "::error::隧道端口验证失败"
             exit 1
           fi
 
-      # ========== 显示连接信息阶段 (新增或修改，更清晰地展示) ==========
+      # ========== 显示连接信息阶段 ==========
       - name: 显示最终连接信息
         run: |
           echo "======================================"
@@ -234,12 +235,8 @@ jobs:
             mysqladmin ping -h ${{ env.HOST }} -u root -p'${{ secrets.WESQL_ROOT_PASSWORD }}' || break
             sleep 60
           done
-          
-          # 容器管理 (无法从外部直接运行)
-          # docker logs -f wesql-server 仅在 GitHub Actions 运行器内部有效
           EOF
           
-          # 显示连接信息 (安全考虑，密码部分打码)
           echo "--- connection_info.txt 内容 (密码已屏蔽) ---"
           sed 's/password = .*/password = ********/' connection_info.txt
           echo "----------------------------------------------"
@@ -247,6 +244,7 @@ jobs:
       - name: 上传连接信息到 R2
         timeout-minutes: 3
         run: |
+          # 确保 AWS CLI 使用 R2 的 endpoint_url 进行操作
           if ! aws s3 cp connection_info.txt "s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_$(date +%Y%m%d_%H%M%S).txt" \
             --endpoint-url "${{ secrets.R2_ENDPOINT_URL }}"; then
             echo "::error::上传连接信息失败"
@@ -257,7 +255,7 @@ jobs:
 
       # ========== 维护阶段 ==========
       - name: 保持服务存活
-        timeout-minutes: 1440  # 24小时超时
+        timeout-minutes: 1440 
         run: |
           echo "=== WeSQL 数据库服务运行中 ==="
           echo "公共访问端点: ${{ env.HOST_PORT }}"
@@ -265,18 +263,15 @@ jobs:
           echo "隧道本地端口: ${{ env.TUNNEL_LOCAL_PORT }}"
           echo "============================="
           
-          # 健康检查循环
           while true; do
             echo "$(date '+%Y-%m-%d %H:%M:%S') 系统状态检查..."
             
-            # 检查容器状态
             if ! docker ps | grep -q wesql-server; then
               echo "::error::容器已停止运行"
               docker logs wesql-server || true
               exit 1
             fi
             
-            # 检查 MySQL 状态
             if ! docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
               mysqladmin ping -u root --silent; then
               echo "::error::MySQL 无响应"
@@ -284,20 +279,16 @@ jobs:
               exit 1
             fi
             
-            # 检查隧道状态 (注意：autossh 应该会自动重连，这里更多是监控)
             if ! netstat -tuln | grep -q "${{ env.TUNNEL_LOCAL_PORT }}"; then
               echo "::warning::SSH 隧道本地端口 (${{ env.TUNNEL_LOCAL_PORT }}) 监听异常。autossh 应该会尝试重连。"
-              # 如果 autossh 真的失效，这个工作流可能会因为连接问题而“静默”失败，
-              # 或者在下一次 MySQL 健康检查时由于隧道不通而报错。
             fi
             
-            # 资源监控
             echo "--- 资源使用情况 ---"
             docker stats wesql-server --no-stream || true
             free -h || true
             df -h || true
             
-            sleep 300  # 5分钟检查一次
+            sleep 300 
           done
 
       # ========== 清理阶段 ==========
@@ -308,5 +299,6 @@ jobs:
           docker stop wesql-server || true
           docker rm wesql-server || true
           docker volume rm wesql-data || true
-          pkill -f "autossh" || true # 杀死 autossh 进程
+          pkill -f "autossh" || true 
           echo "清理完成"
+
