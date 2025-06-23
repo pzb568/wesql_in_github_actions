@@ -1,64 +1,45 @@
 name: 启动 WeSQL 数据库
 
 on:
-  workflow_dispatch:
-    # 允许手动触发工作流
+  workflow_dispatch: # 允许手动触发工作流
 
 concurrency:
   group: start_wesql_database # 确保只有一个 WeSQL 数据库启动工作流在运行
-  cancel-in-progress: true    # 如果有新的同名工作流触发，则取消旧的正在进行的工作流
+  cancel-in-progress: true    # 取消旧的同名工作流
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest # 在最新的 Ubuntu 运行器上执行
-    timeout-minutes: 30    # 整个作业的最大运行时间
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       # ========== 环境准备阶段 ==========
       - name: 检查必要 Secrets
         run: |
-          set -e # 任何命令失败立即退出
+          set -e
           required_secrets=(
-            "WESQL_ROOT_PASSWORD"
-            "R2_ACCESS_KEY_ID"
-            "R2_SECRET_ACCESS_KEY"
-            "R2_BUCKET_NAME"
-            "R2_ENDPOINT_URL"
+            WESQL_ROOT_PASSWORD
+            R2_ACCESS_KEY_ID
+            R2_SECRET_ACCESS_KEY
+            R2_BUCKET_NAME
+            R2_ENDPOINT_URL
           )
-          
-          missing_secrets=()
-          for secret_name in "${required_secrets[@]}"; do
-            # 检查每个 secret 是否为空。注意这里通过 case 语句访问 secrets 上下文。
-            case "$secret_name" in
-              "WESQL_ROOT_PASSWORD") if [ -z "${{ secrets.WESQL_ROOT_PASSWORD }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-              "R2_ACCESS_KEY_ID") if [ -z "${{ secrets.R2_ACCESS_KEY_ID }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-              "R2_SECRET_ACCESS_KEY") if [ -z "${{ secrets.R2_SECRET_ACCESS_KEY }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-              "R2_BUCKET_NAME") if [ -z "${{ secrets.R2_BUCKET_NAME }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-              "R2_ENDPOINT_URL") if [ -z "${{ secrets.R2_ENDPOINT_URL }}" ]; then missing_secrets+=("$secret_name"); fi ;;
-            esac
+          for secret in "${required_secrets[@]}"; do
+            if [ -z "${{ secrets[$secret] }}" ]; then
+              echo "::error::缺少必要的 Secret: $secret"
+              exit 1
+            fi
           done
-          
-          if [ ${#missing_secrets[@]} -gt 0 ]; then
-            echo "::error::缺少必要的 Secrets: ${missing_secrets[*]}"
-            exit 1
-          fi
 
       - name: 安装必要工具
         run: |
           set -e
           sudo apt-get update
-          sudo apt-get install -y \
-            openssh-client \
-            lsof \
-            net-tools \
-            python3-pip
-          
-          # 检查 Docker 是否可用
+          sudo apt-get install -y openssh-client lsof net-tools python3-pip
           if ! docker info >/dev/null 2>&1; then
             echo "::error::Docker 服务不可用"
             exit 1
           fi
-          
           pip3 install awscli
 
       - name: 配置 AWS CLI
@@ -75,15 +56,14 @@ jobs:
           set -e
           if docker inspect wesql-server >/dev/null 2>&1; then
             echo "停止并移除现有容器..."
-            docker stop wesql-server || echo "警告：停止容器失败"
-            docker rm wesql-server || echo "警告：移除容器失败"
-            docker volume rm wesql-data || echo "警告：移除卷失败"
+            docker stop wesql-server || true
+            docker rm -f wesql-server || true
+            docker volume rm wesql-data || true
           fi
 
       - name: 准备 MySQL 配置
         run: |
           set -e
-          # 仅包含 MySQL 核心配置，移除所有对象存储相关配置
           cat > mysql_custom.cnf <<EOF
           [mysqld]
           port=3306
@@ -92,23 +72,22 @@ jobs:
           enforce_gtid_consistency=ON
           log_slave_updates=ON
           binlog_format=ROW
-          # ！！！已移除以下行，现在通过环境变量传递这些配置！！！
-          # repo_objectstore_id=tutorial
-          # objectstore_bucket=${{ secrets.R2_BUCKET_NAME }}
-          # objectstore_region=auto
-          # branch_objectstore_id=main
           EOF
 
       - name: 启动 WeSQL 服务器
         id: start_container
-        timeout-minutes: 10 # 此步骤的最大运行时间
+        timeout-minutes: 10
         run: |
-          set -ex # set -e 错误时退出, set -x 打印调试信息
+          set -ex
+          # 使用更宽的端口范围以降低冲突风险
+          MANAGEMENT_PORT=$(( 20000 + RANDOM % 40000 ))
+          if lsof -i :$MANAGEMENT_PORT >/dev/null; then
+            echo "::error::端口 $MANAGEMENT_PORT 已占用"
+            exit 1
+          fi
+          echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV
           
-          MANAGEMENT_PORT=$(( 20000 + ( RANDOM % 1000 ) )) # 生成一个随机的管理端口
-          echo "MANAGEMENT_PORT=${MANAGEMENT_PORT}" >> $GITHUB_ENV # 将端口添加到环境变量，供后续步骤使用
-          
-          if ! docker run -d \
+          docker run -d \
             --name wesql-server \
             --restart unless-stopped \
             -p 3306:3306 \
@@ -125,244 +104,163 @@ jobs:
             -e WESQL_OBJECTSTORE_REGION="auto" \
             -e WESQL_OBJECTSTORE_REPO_ID="tutorial" \
             -e WESQL_OBJECTSTORE_BRANCH_ID="main" \
-            apecloud/wesql-server:8.0.35-0.1.0_beta3.38; then
-            echo "::error::容器启动失败"
-            docker logs wesql-server || true # 打印容器日志以便调试
-            exit 1
-          fi
+            apecloud/wesql-server:8.0.35 # 使用稳定版本
           
           echo "容器已启动，等待初始化..."
-          sleep 15 # 等待一段时间，让容器初步启动
-          
-          echo "========== 初始日志 (最后100行) =========="
-          docker logs wesql-server --tail 100 # 打印容器的最新日志
-          echo "========================================"
+          sleep 15
+          docker logs wesql-server --tail 100
 
-      # ========== 调试步骤：检查容器内部配置 ==========
       - name: 调试 WeSQL 容器环境变量
-        # 即使容器启动失败，也尝试运行此步骤以获取调试信息
-        if: always() 
+        if: always()
         run: |
-          echo "等待容器稳定以便调试..."
-          # 给容器更多时间来稳定，特别是如果它正在重启
-          sleep 30 
-          echo "执行 'env' 命令在容器内部，过滤 WeSQL 对象存储相关变量..."
-          # 检查容器内部的环境变量是否正确传入
-          docker exec wesql-server env | grep WESQL_OBJECTSTORE_ || echo "未能grep WESQL_OBJECTSTORE_相关的环境变量"
-          
-          echo "执行 'cat /etc/mysql/conf.d/custom.cnf' 在容器内部..."
-          # 检查 custom.cnf 是否按预期只包含核心 MySQL 配置
-          docker exec wesql-server cat /etc/mysql/conf.d/custom.cnf || echo "未能cat /etc/mysql/conf.d/custom.cnf"
-          
-          echo "执行 'cat /etc/my.cnf' 在容器内部..."
-          # 检查主要的 my.cnf 是否存在并被正确加载
-          docker exec wesql-server cat /etc/my.cnf || echo "未能cat /etc/my.cnf"
-          
-          echo "执行 'ps aux' 在容器内部..."
-          # 检查容器内部的进程列表，看 WeSQL 进程是否在运行
-          docker exec wesql-server ps aux || echo "未能执行 ps aux"
-          
-          echo "========== 调试信息结束 =========="
+          set +e
+          sleep 30
+          echo "调试容器环境..."
+          docker exec wesql-server env | grep WESQL_OBJECTSTORE_ || echo "无 WESQL_OBJECTSTORE_ 环境变量"
+          docker exec wesql-server cat /etc/mysql/conf.d/custom.cnf || echo "无法读取 custom.cnf"
+          docker exec wesql-server cat /etc/my.cnf || echo "无法读取 my.cnf"
+          docker exec wesql-server ps aux || echo "无法执行 ps aux"
+          echo "调试信息结束"
 
-      # ========== 健康检查阶段 ==========
       - name: 等待 MySQL 启动
-        timeout-minutes: 5 # 此步骤的最大运行时间
+        timeout-minutes: 5
         run: |
           set -e
           attempt=0
-          max_attempts=30 # 最大尝试次数
-          sleep_interval=5 # 初始休眠间隔
-          
+          max_attempts=30
+          sleep_interval=5
           while [ $attempt -lt $max_attempts ]; do
-            # 尝试 ping MySQL 服务器
             if docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
               mysqladmin ping -u root --silent; then
               echo "MySQL 已成功启动"
               exit 0
             fi
-            
-            # 每隔 10 次尝试打印一次状态信息
-            if [ $(( attempt % 10 )) -eq 0 ]; then
-              echo "检查状态 (尝试 $((attempt+1))/$max_attempts)..."
-              docker logs wesql-server --since 1m || true # 打印最近1分钟的日志
-            fi
-            
+            echo "尝试 $((attempt+1))/$max_attempts..."
+            docker logs wesql-server --since 1m || true
             sleep $sleep_interval
-            # 逐步增加休眠时间，最大不超过 15 秒
-            sleep_interval=$(( sleep_interval + 2 ))
-            if [ $sleep_interval -gt 15 ]; then
-                sleep_interval=15
-            fi
+            sleep_interval=$(( sleep_interval + 2 > 15 ? 15 : sleep_interval + 2 ))
             attempt=$(( attempt + 1 ))
           done
-          
           echo "::error::MySQL 启动超时"
-          docker logs wesql-server || true # 打印最终日志以便调试
+          docker logs wesql-server || true
           exit 1
 
-      # ========== 网络配置阶段 ==========
       - name: 设置 SSH 隧道
         id: ssh_tunnel
-        timeout-minutes: 5 # 此步骤的最大运行时间
+        timeout-minutes: 5
         run: |
           set -e
-          TUNNEL_LOCAL_PORT=$(( 30000 + ( RANDOM % 1000 ) )) # 为本地隧道生成随机端口
-          echo "TUNNEL_LOCAL_PORT=${TUNNEL_LOCAL_PORT}" >> $GITHUB_ENV # 将端口添加到环境变量
+          TUNNEL_LOCAL_PORT=$(( 30000 + RANDOM % 30000 ))
+          if lsof -i :$TUNNEL_LOCAL_PORT >/dev/null; then
+            echo "::error::端口 $TUNNEL_LOCAL_PORT 已占用"
+            exit 1
+          fi
+          echo "TUNNEL_LOCAL_PORT=${TUNNEL_LOCAL_PORT}" >> $GITHUB_ENV
           
-          sudo apt-get install -y autossh # 安装 autossh 用于自动重连
-          
-          echo "正在建立 SSH 隧道 (本地端口 ${TUNNEL_LOCAL_PORT})..."
-          # 使用 serveo.net 建立反向 SSH 隧道，将远程端口映射到本地的 3306 端口
-          # -M 0: 禁用控制通道， -o "ServerAliveInterval": 保持连接活跃
-          # -f: 后台运行, -N: 不执行远程命令, -R: 反向隧道
+          sudo apt-get install -y autossh
+          echo "建立 SSH 隧道 (本地端口 ${TUNNEL_LOCAL_PORT})..."
           autossh -M 0 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
             -o "ExitOnForwardFailure=yes" -o "StrictHostKeyChecking=no" \
             -f -N -R 0:localhost:3306 serveo.net > serveo.log 2>&1 &
           
-          sleep 5 # 等待隧道建立
-          
+          sleep 5
           if ! pgrep -f autossh >/dev/null; then
             echo "::error::autossh 进程未运行"
             cat serveo.log
             exit 1
           fi
-          
           if ! grep -q "Forwarding TCP" serveo.log; then
             echo "::error::SSH 隧道建立失败"
             cat serveo.log
             exit 1
           fi
           
-          # 从日志中提取公共访问地址和端口
           TUNNEL_INFO=$(grep -m1 "Forwarding TCP" serveo.log)
           HOST_PORT=$(echo "$TUNNEL_INFO" | awk '{print $NF}')
-          echo "公共访问地址: ${HOST_PORT}"
-          
-          # 将主机和端口分离并添加到环境变量
           echo "HOST=$(echo "${HOST_PORT}" | cut -d':' -f1)" >> $GITHUB_ENV
           echo "PORT=$(echo "${HOST_PORT}" | cut -d':' -f2)" >> $GITHUB_ENV
-          echo "HOST_PORT=${HOST_PORT}" >> $GITHUB_ENV # 保存完整的 Host:Port
+          echo "HOST_PORT=${HOST_PORT}" >> $GITHUB_ENV
           
-          # 验证隧道端口是否可达
           if ! nc -z $(echo "${HOST_PORT}" | tr ':' ' '); then
             echo "::error::隧道端口验证失败"
             exit 1
           fi
 
-      # ========== 显示连接信息阶段 ==========
       - name: 显示最终连接信息
         run: |
           echo "======================================"
           echo "         WeSQL 数据库连接信息         "
           echo "======================================"
-          echo "  主机 (Host):    ${{ env.HOST }}"
-          echo "  端口 (Port):    ${{ env.PORT }}"
-          echo "  用户名 (User):  root"
-          echo "  密码 (Password): [请从 GitHub Secrets WESQL_ROOT_PASSWORD 获取]"
+          echo "  主机: ${{ env.HOST }}"
+          echo "  端口: ${{ env.PORT }}"
+          echo "  用户名: root"
+          echo "  密码: [请从 GitHub Secrets 获取]"
           echo "--------------------------------------"
-          echo "  完整连接地址: ${HOST_PORT}"
+          echo "  完整连接地址: ${{ env.HOST_PORT }}"
           echo "======================================"
-          echo "" # 保持一行空行以作视觉分隔
-          echo "请使用以上信息从您的本地机器连接。"
-          echo "注意：此连接在工作流期间有效，最长持续6小时。"
+          echo "请使用以上信息连接，连接有效期 6小时。"
 
-      # ========== 信息同步阶段 ==========
       - name: 生成连接信息文件
         run: |
           set -e
-          cat <<EOF > connection_info.txt
+          cat > connection_info.txt <<EOF
           # WeSQL 数据库连接信息
-          
           [连接参数]
-          主机名 = ${{ env.HOST }}
-          端口 = ${{ env.PORT }}
-          用户名 = root
-          密码 = [请从 GitHub Secrets WESQL_ROOT_PASSWORD 获取]
-          
+          主机名: ${{ env.HOST }}
+          端口: ${{ env.PORT }}
+          用户名: root
+          密码: [请从GitHub Secrets获取]
           [命令行连接]
-          mysql -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p'[请输入 WESQL_ROOT_PASSWORD]'
-          
-          [管理命令]
-          # 保持存活连接 (此命令在您的本地终端运行中运行)
-          while true; do
-              mysqladmin ping -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p'[请输入 WESQL_ROOT_PASSWORD]' || break
-              sleep 60
-          done
+          mysql -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p'[请输入密码]'
           EOF
-          
-          echo "--- connection_info.txt 内容 ---"
           cat connection_info.txt
-          echo "--------------------------------------"
 
       - name: 上传连接信息到 R2
-        timeout-minutes: 3
         run: |
           set -e
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S) # 运行时生成时间戳
-          R2_FILE_PATH="s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_${TIMESTAMP}.txt"
-          
-          if ! aws s3 cp connection_info.txt "$R2_FILE_PATH"; then
-            echo "::error::上传连接信息失败"
-            exit 1
-          fi
-          
-          echo "已成功将连接信息存储到 R2 存储桶: $R2_FILE_PATH"
+          TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
+          R2_FILE="/="
 
-      # ========== 维护阶段 ==========
+s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_${TIMESTAMP}.txt"
+          aws s3 cp connection_info.txt "$R2_FILE"
+          echo "已上传至: $R2_FILE"
+
       - name: 保持服务存活
-        timeout-minutes: 360 # 6小时，工作流在此步骤停留的最长时间
+        timeout-minutes: 360
         run: |
           set -e
           echo "=== WeSQL 数据库运行中 ==="
-          echo "公共访问端点: ${{ env.HOST_PORT }}"
+          echo "公共访问: ${{ env.HOST_PORT }}"
           echo "管理端口: ${{ env.MANAGEMENT_PORT }}"
-          echo "隧道本地端口: ${{ env.TUNNEL_LOCAL_PORT }}"
-          echo "============================="
-          echo "注意：此工作流将在 6 小时后自动终止。请重新触发工作流以继续使用数据库。"
-          
           while true; do
-              echo "$(date '+%Y-%m-%d %H:%M:%S') 系统状态检查..."
-              
-              # 检查 Docker 容器是否仍在运行
-              if ! docker ps | grep -q wesql-server; then
-                  echo "::error::WeSQL 容器已停止运行"
-                  docker logs wesql-server || true
-                  exit 1
-              fi
-              
-              # 检查 MySQL 服务是否响应
-              if ! docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD }}" wesql-server \
-                 mysqladmin ping -u root --silent; then
-                  echo "::error::MySQL 无响应"
-                  docker logs wesql-server --since 5m || true
-                  exit 1
-              fi
-              
-              # 检查 SSH 隧道本地端口是否仍在监听
-              if ! sudo netstat -tuln | grep -q "${{ env.TUNNEL_LOCAL_PORT }}"; then
-                  echo "::warning::SSH 隧道本地端口 (${{ env.TUNNEL_LOCAL_PORT }}) 监听异常。autossh 应该会尝试重连。"
-              fi
-              
-              echo "--- 资源使用情况 ---"
-              docker stats wesql-server --no-stream || true # 显示容器资源使用
-              free -h || true # 显示内存使用
-              df -h || true # 显示磁盘使用
-              
-              sleep 300 # 每 5 分钟检查一次
+            echo "$(date -u) 检查状态..."
+            if ! docker ps | grep -q wesql-server; then
+              echo "::error::容器停止"
+              docker logs wesql-server || true
+              exit 1
+            fi
+            if ! docker exec -e MYSQL_PWD="${{ secrets.WESQL_ROOT_PASSWORD}}" wesql-server \
+              mysqladmin ping -u root --silent; then
+              echo "::error::MySQL 无响应"
+              docker logs wesql-server --since 5m || true
+              exit 1
+            fi
+            if ! sudo netstat -tuln | grep -q "${{ env.TUNNEL_LOCAL_PORT}}"; then
+              echo "::warning::SSH 隧道端口异常"
+            fi
+            docker stats wesql-server --no-stream || true
+            sleep 300
           done
 
-      # ========== 清理阶段 ==========
       - name: 清理资源
-        # 无论前面步骤成功与否，此步骤都会运行
-        if: ${{ always() }} 
+        if: always()
         run: |
-          echo "=== 执行清理操作 ==="
-          # 停止并移除 WeSQL 容器及其卷
-          docker stop wesql-server || echo "警告：停止容器失败"
-          docker rm -f wesql-server || echo "警告：移除容器失败"
-          docker volume rm -v wesql-data || echo "警告：移除卷失败"
-          # 终止 autossh 进程
-          sudo pkill -f "autossh" || echo "警告：终止 autossh 失败"
-          # 移除临时文件
-          rm -f connection_info.txt mysql_custom.cnf serveo.log || echo "警告：移除临时文件失败"
+          set -e
+          echo "清理资源..."
+          docker stop wesql-server || true
+          docker rm -f wesql-server || true
+          docker volume rm wesql-data || true
+          docker network prune -f || true
+          sudo pkill -f autossh || true
+          rm -f connection_info.txt mysql_custom.cnf serveo.log || true
           echo "清理完成"
