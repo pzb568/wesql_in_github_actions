@@ -2,6 +2,11 @@ name: Start WeSQL with Cloudflare Tunnel
 
 on:
   workflow_dispatch:
+    inputs:
+      keepalive_minutes:
+        description: "保持运行时间（分钟）"
+        required: true
+        default: "30"
 
 concurrency:
   group: start_wesql_database
@@ -57,9 +62,12 @@ jobs:
           echo "Cloudflare Tunnel 地址：$URL"
 
       - name: 生成并上传远程连接信息至 Cloudflare R2
+        id: upload
         run: |
           HOST=$(echo "${{ env.TUNNEL_URL }}" | cut -d':' -f2 | tr -d '/')
           PORT=$(echo "${{ env.TUNNEL_URL }}" | cut -d':' -f3)
+          NOW=$(date -u '+%Y-%m-%d %H:%M:%S')
+          EXPIRE=$(date -u -d "+${{ github.event.inputs.keepalive_minutes }} minutes" '+%Y-%m-%d %H:%M:%S')
 
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
@@ -74,29 +82,43 @@ jobs:
             <li><b>用户名:</b> root</li>
             <li><b>密码:</b> 请使用 GitHub Secret 中设置的密码</li>
             <li><b>CLI 示例:</b><br>
-              <code>mysql -h $HOST -P $PORT -u root -p</code>
+              <code id="cli">mysql -h $HOST -P $PORT -u root -p</code>
+              <button onclick="navigator.clipboard.writeText(document.getElementById('cli').innerText)">复制</button>
+            </li>
+            <li><b>MySQL URI:</b><br>
+              <code>mysql://root:[YOUR_PASSWORD]@$HOST:$PORT</code>
+            </li>
+            <li><b>图形界面工具连接:</b> 可使用 
+              <a href="https://dbeaver.io">DBeaver</a>、
+              <a href="https://www.mysql.com/products/workbench/">MySQL Workbench</a> 或 Navicat。
             </li>
           </ul>
-          <p>⚠️ 此连接有效期为 6 小时。</p>
+          <p>🔒 连接创建于：<code>$NOW UTC</code></p>
+          <p>⏳ 有效期至：<code>$EXPIRE UTC</code></p>
           </body>
           </html>
           EOF
 
-          # 正确配置 AWS CLI 用于 Cloudflare R2
           aws configure set aws_access_key_id "${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}"
           aws configure set aws_secret_access_key "${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}"
           aws configure set default.region us-east-1
 
           TIMESTAMP=$(date +%s)
-          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/wesql_connection_$TIMESTAMP.html \
+          FILENAME="wesql_connection_$TIMESTAMP.html"
+          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/$FILENAME \
             --endpoint-url "${{ secrets.WESQL_OBJECTSTORE_ENDPOINT_URL }}"
 
-      - name: 保持运行（最长 6 小时）
+          echo "S3_LINK=${{ secrets.WESQL_OBJECTSTORE_ENDPOINT_URL }}/${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/$FILENAME" >> $GITHUB_ENV
+
+      - name: 输出远程连接页面链接
         run: |
-          echo "服务正在运行，可通过 Cloudflare Tunnel 远程访问数据库。"
-          while docker ps | grep -q wesql-server; do
-            sleep 60
-          done
+          echo "✅ 远程连接信息页面："
+          echo "${{ env.S3_LINK }}"
+
+      - name: 保持运行指定时间
+        run: |
+          echo "服务已启动，保持运行 ${{ github.event.inputs.keepalive_minutes }} 分钟..."
+          sleep $((${{ github.event.inputs.keepalive_minutes }} * 60))
 
       - name: 清理资源
         if: always()
