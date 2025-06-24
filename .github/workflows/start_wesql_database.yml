@@ -15,8 +15,9 @@ jobs:
     steps:
       - name: 安装依赖与 cloudflared
         run: |
+          docker --version
           sudo apt-get update
-          sudo apt-get install -y curl netcat-openbsd python3-pip docker.io
+          sudo apt-get install -y curl netcat-openbsd python3-pip
           pip3 install awscli
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
@@ -32,13 +33,13 @@ jobs:
         run: |
           for i in {1..30}; do
             if nc -z localhost 3306; then
-              echo "✅ WeSQL 启动成功"
+              echo "WeSQL 启动成功"
               exit 0
             fi
-            echo "⌛ 等待数据库启动中... ($i/30)"
+            echo "等待数据库启动中..."
             sleep 5
           done
-          echo "::error::❌ WeSQL 启动失败"
+          echo "::error::WeSQL 启动失败"
           docker logs wesql-server
           exit 1
 
@@ -49,17 +50,20 @@ jobs:
           sleep 10
           TUNNEL_URL=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' tunnel.log | head -n1)
           if [ -z "$TUNNEL_URL" ]; then
-            echo "::error::❌ Cloudflare Tunnel 启动失败"
+            echo "::error::Cloudflare Tunnel 启动失败"
             cat tunnel.log
             exit 1
           fi
           echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-          echo "🌐 Cloudflare Tunnel 地址: $TUNNEL_URL"
+          echo "Cloudflare Tunnel 地址：$TUNNEL_URL"
 
-      - name: 生成并上传连接信息页面
+      - name: 生成并上传远程连接信息
         run: |
           HOST=$(echo "${{ env.TUNNEL_URL }}" | cut -d':' -f2 | tr -d '/')
           PORT=$(echo "${{ env.TUNNEL_URL }}" | cut -d':' -f3)
+
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
 
           cat > connection_info.html <<EOF
           <html>
@@ -69,7 +73,7 @@ jobs:
             <li><b>主机地址:</b> <code>$HOST</code></li>
             <li><b>端口:</b> <code>$PORT</code></li>
             <li><b>用户名:</b> root</li>
-            <li><b>密码:</b> ${{ secrets.WESQL_ROOT_PASSWORD }}</li>
+            <li><b>密码:</b> [请使用 GitHub Secret 中配置的密码]</li>
             <li><b>CLI 示例:</b><br>
               <code>mysql -h $HOST -P $PORT -u root -p</code>
             </li>
@@ -81,24 +85,17 @@ jobs:
 
           aws configure set aws_access_key_id "${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}"
           aws configure set aws_secret_access_key "${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}"
-          aws configure set default.region us-east-1
+          aws configure set default.region auto
           aws configure set default.s3.signature_version s3v4
           aws configure set default.s3.endpoint_url "${{ secrets.WESQL_OBJECTSTORE_ENDPOINT_URL }}"
 
           TIMESTAMP=$(date +%s)
-          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/wesql_connection_$TIMESTAMP.html || {
-            echo "::error::上传失败，请确认 R2 Bucket 名称与 endpoint 是否正确"
-            exit 1
-          }
+          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/wesql_connection_$TIMESTAMP.html
 
       - name: 保持运行（6小时）
         run: |
-          echo "服务运行中，6小时后自动清理..."
-          for i in {1..360}; do
-            if ! docker ps | grep -q wesql-server; then
-              echo "::error::数据库容器中断，终止守护"
-              exit 1
-            fi
+          echo "服务正在运行，可通过 Cloudflare Tunnel 远程访问数据库。"
+          while docker ps | grep -q wesql-server; do
             sleep 60
           done
 
