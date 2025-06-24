@@ -7,22 +7,19 @@
 2. 配置 Github Actions 所需的 Secret
 [start_wesql_database.yml](.github%2Fworkflows%2Fstart_wesql_database.yml) 需要在存储库设置中配置以下密钥：
 
-R2_ACCESS_KEY_ID #r2访问密钥ID 
+WESQL_OBJECTSTORE_ACCESS_KEY #r2访问密钥ID 
 
-R2_SECRET_ACCESS_KEY #r2机密访问密钥
+WESQL_OBJECTSTORE_SECRET_KEY #r2机密访问密钥
  
-R2_ACCOUNT_ID # Cloudflare账户id 
+WESQL_OBJECTSTORE_BUCKET #存储桶的名字如websql
  
-R2_BUCKET_NAME #存储桶的名字如websql
+WESQL_OBJECTSTORE_REGION #r2存储桶地区如us-east-1
  
-R2_REGION auto #r2存储桶地区如auto
- 
-R2_ENDPOINT_URL #r2存储S3 API地址
+WESQL_OBJECTSTORE_ENDPOINT_URL #r2存储S3 API地址
  
 WESQL_ROOT_PASSWORD # MySQL数据库的root密码
 
-![](https://roim-picx-9xa.pages.dev/rest/88deuUK.jpeg)
-
+![Secret设置](https://roim-picx-9xa.pages.dev/rest/ZmNEAuK.jpeg)
 
 3. 触发 Github Actions
 [start_wesql_database.yml](.github%2Fworkflows%2Fstart_wesql_database.yml) 可能是自动触发的，您也可以手动触发。不用担心并发性，最近一次运行会取消上一次运行。
