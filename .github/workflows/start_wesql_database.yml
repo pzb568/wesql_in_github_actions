@@ -1,4 +1,4 @@
-name: Start WeSQL Database with Cloudflare Tunnel
+name: Start WeSQL with Cloudflare Tunnel
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 安装依赖
+      - name: 安装依赖与 cloudflared
         run: |
           sudo apt-get update
           sudo apt-get install -y curl netcat-openbsd python3-pip
@@ -21,59 +21,65 @@ jobs:
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
 
-      - name: 启动 WeSQL Server 容器
+      - name: 启动 WeSQL 容器
         run: |
-          docker run -itd --network host --name wesql-server \
+          docker run -d --name wesql-server \
+            -p 3306:3306 \
             -e MYSQL_ROOT_PASSWORD="${{ secrets.WESQL_ROOT_PASSWORD }}" \
-            -e WESQL_OBJECTSTORE_BUCKET="${{ secrets.WESQL_OBJECTSTORE_BUCKET }}" \
-            -e WESQL_OBJECTSTORE_REGION="${{ secrets.WESQL_OBJECTSTORE_REGION }}" \
-            -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}" \
-            -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}" \
-            -e WESQL_CLUSTER_MEMBER="127.0.0.1:13306" \
             apecloud/wesql-server:8.0.35-0.1.0_beta3.38
 
-      - name: 等待数据库启动
+      - name: 等待 WeSQL 启动
         run: |
           for i in {1..30}; do
             if nc -z localhost 3306; then
-              echo "WeSQL 已启动"
+              echo "WeSQL 启动成功"
               exit 0
             fi
             echo "等待数据库启动中..."
             sleep 5
           done
           echo "::error::WeSQL 启动失败"
+          docker logs wesql-server
           exit 1
 
       - name: 启动 Cloudflare Tunnel
-        id: cloudflare_tunnel
+        id: tunnel
         run: |
           cloudflared tunnel --url tcp://localhost:3306 --no-autoupdate --logfile tunnel.log &
-          sleep 10
+          sleep 8
           URL=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' tunnel.log | head -n1)
           if [ -z "$URL" ]; then
-            echo "::error::Cloudflare Tunnel 地址未找到"
+            echo "::error::Cloudflare Tunnel 启动失败"
             cat tunnel.log
             exit 1
           fi
-          HOST=$(echo "$URL" | cut -d':' -f2 | tr -d '/')
-          PORT=$(echo "$URL" | cut -d':' -f3)
+          echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
+          echo "Cloudflare Tunnel 地址：$URL"
+
+      - name: 生成并上传远程连接信息
+        run: |
+          HOST=$(echo "${{ env.TUNNEL_URL }}" | cut -d':' -f2 | tr -d '/')
+          PORT=$(echo "${{ env.TUNNEL_URL }}" | cut -d':' -f3)
 
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
-          echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
 
-      - name: 生成并上传连接信息
-        run: |
           cat > connection_info.html <<EOF
-          <html><body>
-          <h2>WeSQL 数据库连接信息</h2>
-          <p><strong>地址:</strong> <code>${{ env.TUNNEL_URL }}</code></p>
-          <p><strong>用户名:</strong> root</p>
-          <p><strong>密码:</strong> [保密]</p>
-          <p><strong>MySQL CLI:</strong><br><code>mysql -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p</code></p>
-          <p>有效期：6小时</p>
-          </body></html>
+          <html>
+          <body>
+          <h2>WeSQL 数据库远程连接信息</h2>
+          <ul>
+            <li><b>主机地址:</b> <code>$HOST</code></li>
+            <li><b>端口:</b> <code>$PORT</code></li>
+            <li><b>用户名:</b> root</li>
+            <li><b>密码:</b> [你的 secret 中设置的密码]</li>
+            <li><b>CLI 示例:</b><br>
+              <code>mysql -h $HOST -P $PORT -u root -p</code>
+            </li>
+          </ul>
+          <p>⚠️ 此连接有效期为 6 小时。</p>
+          </body>
+          </html>
           EOF
 
           aws configure set aws_access_key_id "${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}"
@@ -81,11 +87,13 @@ jobs:
           aws configure set default.region auto
           aws configure set default.s3.signature_version s3v4
           aws configure set default.s3.endpoint_url "${{ secrets.WESQL_OBJECTSTORE_ENDPOINT_URL }}"
-          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/wesql_connection_$(date +%s).html
 
-      - name: 保持服务运行
+          TIMESTAMP=$(date +%s)
+          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/wesql_connection_$TIMESTAMP.html
+
+      - name: 保持运行（6小时）
         run: |
-          echo "服务已启动，保持运行6小时..."
+          echo "服务正在运行，可通过 Cloudflare Tunnel 远程访问数据库。"
           while docker ps | grep -q wesql-server; do
             sleep 60
           done
@@ -93,5 +101,6 @@ jobs:
       - name: 清理资源
         if: always()
         run: |
-          docker rm -f wesql-server || true
+          docker stop wesql-server || true
+          docker rm wesql-server || true
           pkill -f cloudflared || true
