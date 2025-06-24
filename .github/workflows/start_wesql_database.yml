@@ -1,95 +1,91 @@
-name: 启动 WeSQL + Cloudflare Tunnel
+name: Start WeSQL Database with Cloudflare Tunnel
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: start_wesql
+  group: start_wesql_database
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     steps:
-      - name: 检查必要 Secrets
-        env:
-          SECRET_WESQL_ROOT_PASSWORD: ${{ secrets.WESQL_ROOT_PASSWORD }}
-          SECRET_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          SECRET_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          SECRET_R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          SECRET_R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
-        run: |
-          for key in \
-            SECRET_WESQL_ROOT_PASSWORD SECRET_R2_ACCESS_KEY_ID \
-            SECRET_R2_SECRET_ACCESS_KEY SECRET_R2_BUCKET_NAME \
-            SECRET_R2_ENDPOINT_URL; do
-            if [ -z "${!key}" ]; then
-              echo "::error::缺少必要 Secret: ${key}"
-              exit 1
-            fi
-          done
-
-      - name: 安装 cloudflared 和 awscli
+      - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl python3-pip
+          sudo apt-get install -y curl netcat python3-pip
           pip3 install awscli
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/
+          chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
 
-      - name: 创建 MySQL 配置文件
+      - name: 启动 WeSQL Server 容器
         run: |
-          cat > mysql_custom.cnf <<EOF
-          [mysqld]
-          port=3306
-          log-bin=binlog
-          gtid_mode=ON
-          enforce_gtid_consistency=ON
-          log_slave_updates=ON
-          binlog_format=ROW
-          EOF
-
-      - name: 启动 WeSQL 容器
-        run: |
-          docker run -d \
-            --name wesql-server \
-            -p 3306:3306 \
-            -v wesql-data:/data/mysql \
-            -v "$(pwd)/mysql_custom.cnf:/etc/mysql/conf.d/custom.cnf" \
+          docker run -itd --network host --name wesql-server \
             -e MYSQL_ROOT_PASSWORD="${{ secrets.WESQL_ROOT_PASSWORD }}" \
-            apecloud/wesql-server:8.0.35
+            -e WESQL_OBJECTSTORE_BUCKET="${{ secrets.WESQL_OBJECTSTORE_BUCKET }}" \
+            -e WESQL_OBJECTSTORE_REGION="${{ secrets.WESQL_OBJECTSTORE_REGION }}" \
+            -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}" \
+            -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}" \
+            -e WESQL_CLUSTER_MEMBER="127.0.0.1:13306" \
+            apecloud/wesql-server:8.0.35-0.1.0_beta3.38
+
+      - name: 等待数据库启动
+        run: |
+          for i in {1..30}; do
+            if nc -z localhost 3306; then
+              echo "WeSQL 已启动"
+              exit 0
+            fi
+            echo "等待数据库启动中..."
+            sleep 5
+          done
+          echo "::error::WeSQL 启动失败"
+          exit 1
 
       - name: 启动 Cloudflare Tunnel
+        id: cloudflare_tunnel
         run: |
           cloudflared tunnel --url tcp://localhost:3306 --no-autoupdate --logfile tunnel.log &
           sleep 10
-          echo "TUNNEL_URL=$(grep -m1 'trycloudflare.com' tunnel.log | grep -oE 'tcp://[a-zA-Z0-9.-]+:[0-9]+')" >> $GITHUB_ENV
+          URL=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' tunnel.log | head -n1)
+          if [ -z "$URL" ]; then
+            echo "::error::Cloudflare Tunnel 地址未找到"
+            cat tunnel.log
+            exit 1
+          fi
+          HOST=$(echo "$URL" | cut -d':' -f2 | tr -d '/')
+          PORT=$(echo "$URL" | cut -d':' -f3)
 
-      - name: 生成 HTML 连接信息
-        run: |
-          echo "<html><body><h2>WeSQL 数据库连接信息</h2>" > connection_info.html
-          echo "<p><strong>隧道地址:</strong> <code>${{ env.TUNNEL_URL }}</code></p>" >> connection_info.html
-          echo "<p><strong>用户名:</strong> root</p>" >> connection_info.html
-          echo "<p><strong>密码:</strong> [保密]</p>" >> connection_info.html
-          echo "<p><strong>有效期:</strong> 6 小时</p>" >> connection_info.html
-          echo "</body></html>" >> connection_info.html
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
 
-      - name: 上传 HTML 到 R2
+      - name: 生成并上传连接信息
         run: |
-          aws configure set aws_access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}"
-          aws configure set aws_secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          cat > connection_info.html <<EOF
+          <html><body>
+          <h2>WeSQL 数据库连接信息</h2>
+          <p><strong>地址:</strong> <code>${{ env.TUNNEL_URL }}</code></p>
+          <p><strong>用户名:</strong> root</p>
+          <p><strong>密码:</strong> [保密]</p>
+          <p><strong>MySQL CLI:</strong><br><code>mysql -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p</code></p>
+          <p>有效期：6小时</p>
+          </body></html>
+          EOF
+
+          aws configure set aws_access_key_id "${{ secrets.WESQL_OBJECTSTORE_ACCESS_KEY }}"
+          aws configure set aws_secret_access_key "${{ secrets.WESQL_OBJECTSTORE_SECRET_KEY }}"
           aws configure set default.region auto
           aws configure set default.s3.signature_version s3v4
-          aws configure set default.s3.endpoint_url "${{ secrets.R2_ENDPOINT_URL }}"
-          aws s3 cp connection_info.html "s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_$(date +%s).html"
+          aws configure set default.s3.endpoint_url "${{ secrets.WESQL_OBJECTSTORE_ENDPOINT_URL }}"
+          aws s3 cp connection_info.html s3://${{ secrets.WESQL_OBJECTSTORE_BUCKET }}/wesql_connection_$(date +%s).html
 
-      - name: 保持运行 6 小时
-        timeout-minutes: 360
+      - name: 保持服务运行
         run: |
-          echo "服务运行中，保持 6 小时"
+          echo "服务已启动，保持运行6小时..."
           while docker ps | grep -q wesql-server; do
             sleep 60
           done
@@ -98,6 +94,4 @@ jobs:
         if: always()
         run: |
           docker rm -f wesql-server || true
-          docker volume rm wesql-data || true
-          pkill cloudflared || true
-          echo "资源清理完成"
+          pkill -f cloudflared || true
