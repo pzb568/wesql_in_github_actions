@@ -1,10 +1,10 @@
-name: 启动 WeSQL 数据库 + Cloudflare Tunnel
+name: 启动 WeSQL + Cloudflare Tunnel
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: wesql-deploy
+  group: start_wesql
   cancel-in-progress: true
 
 jobs:
@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: 检查 Secrets
+      - name: 检查必要 Secrets
         env:
           SECRET_WESQL_ROOT_PASSWORD: ${{ secrets.WESQL_ROOT_PASSWORD }}
           SECRET_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -21,46 +21,26 @@ jobs:
           SECRET_R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
           SECRET_R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
         run: |
-          secrets=(
-            "SECRET_WESQL_ROOT_PASSWORD"
-            "SECRET_R2_ACCESS_KEY_ID"
-            "SECRET_R2_SECRET_ACCESS_KEY"
-            "SECRET_R2_BUCKET_NAME"
-            "SECRET_R2_ENDPOINT_URL"
-          )
-          for s in "${secrets[@]}"; do
-            if [ -z "${!s}" ]; then
-              echo "::error::缺少Secret: ${s#SECRET_}"
+          for key in \
+            SECRET_WESQL_ROOT_PASSWORD SECRET_R2_ACCESS_KEY_ID \
+            SECRET_R2_SECRET_ACCESS_KEY SECRET_R2_BUCKET_NAME \
+            SECRET_R2_ENDPOINT_URL; do
+            if [ -z "${!key}" ]; then
+              echo "::error::缺少必要 Secret: ${key}"
               exit 1
             fi
           done
 
-      - name: 安装依赖 & Docker & cloudflared
+      - name: 安装 cloudflared 和 awscli
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl ca-certificates gnupg lsb-release python3-pip
+          sudo apt-get install -y curl python3-pip
           pip3 install awscli
-          # 安装 Docker 官方版本
-          sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-          https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-          sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-
-          # 安装 cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/
 
-      - name: 克隆并构建 WeSQL
-        run: |
-          git clone https://github.com/apecloud/wesql-server.git
-          cd wesql-server
-          docker build -t custom-wesql-server .
-
-      - name: 准备配置文件
+      - name: 创建 MySQL 配置文件
         run: |
           cat > mysql_custom.cnf <<EOF
           [mysqld]
@@ -80,15 +60,7 @@ jobs:
             -v wesql-data:/data/mysql \
             -v "$(pwd)/mysql_custom.cnf:/etc/mysql/conf.d/custom.cnf" \
             -e MYSQL_ROOT_PASSWORD="${{ secrets.WESQL_ROOT_PASSWORD }}" \
-            -e WESQL_OBJECTSTORE_ACCESS_KEY="${{ secrets.R2_ACCESS_KEY_ID }}" \
-            -e WESQL_OBJECTSTORE_SECRET_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
-            -e WESQL_OBJECTSTORE_ENDPOINT_URL="${{ secrets.R2_ENDPOINT_URL }}" \
-            -e WESQL_OBJECTSTORE_PROVIDER="s3" \
-            -e WESQL_OBJECTSTORE_BUCKET="${{ secrets.R2_BUCKET_NAME }}" \
-            -e WESQL_OBJECTSTORE_REGION="auto" \
-            -e WESQL_OBJECTSTORE_REPO_ID="tutorial" \
-            -e WESQL_OBJECTSTORE_BRANCH_ID="main" \
-            custom-wesql-server
+            apecloud/wesql-server:8.0.35
 
       - name: 启动 Cloudflare Tunnel
         run: |
@@ -96,29 +68,28 @@ jobs:
           sleep 10
           echo "TUNNEL_URL=$(grep -m1 'trycloudflare.com' tunnel.log | grep -oE 'tcp://[a-zA-Z0-9.-]+:[0-9]+')" >> $GITHUB_ENV
 
-      - name: 生成 HTML 格式连接信息
+      - name: 生成 HTML 连接信息
         run: |
           echo "<html><body><h2>WeSQL 数据库连接信息</h2>" > connection_info.html
           echo "<p><strong>隧道地址:</strong> <code>${{ env.TUNNEL_URL }}</code></p>" >> connection_info.html
           echo "<p><strong>用户名:</strong> root</p>" >> connection_info.html
           echo "<p><strong>密码:</strong> [保密]</p>" >> connection_info.html
-          echo "<p>⚠️ 此隧道仅有效 6 小时。</p>" >> connection_info.html
+          echo "<p><strong>有效期:</strong> 6 小时</p>" >> connection_info.html
           echo "</body></html>" >> connection_info.html
-          cat connection_info.html
 
       - name: 上传 HTML 到 R2
         run: |
           aws configure set aws_access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}"
           aws configure set aws_secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}"
-          aws configure set default.region "auto"
+          aws configure set default.region auto
           aws configure set default.s3.signature_version s3v4
           aws configure set default.s3.endpoint_url "${{ secrets.R2_ENDPOINT_URL }}"
           aws s3 cp connection_info.html "s3://${{ secrets.R2_BUCKET_NAME }}/wesql_connection_$(date +%s).html"
 
-      - name: 保持服务运行
+      - name: 保持运行 6 小时
         timeout-minutes: 360
         run: |
-          echo "数据库和隧道已启动，将保持运行6小时"
+          echo "服务运行中，保持 6 小时"
           while docker ps | grep -q wesql-server; do
             sleep 60
           done
@@ -129,4 +100,4 @@ jobs:
           docker rm -f wesql-server || true
           docker volume rm wesql-data || true
           pkill cloudflared || true
-          echo "资源已清理完毕"
+          echo "资源清理完成"
