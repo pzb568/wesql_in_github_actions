@@ -51,13 +51,22 @@ jobs:
         id: tunnel
         run: |
           cloudflared tunnel --url tcp://localhost:3306 --no-autoupdate --logfile tunnel.log &
-          sleep 8
-          URL=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' tunnel.log | head -n1)
+          
+          echo "等待 Cloudflare Tunnel 启动..."
+          for i in {1..20}; do
+            URL=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' tunnel.log | head -n1)
+            if [ -n "$URL" ]; then
+              break
+            fi
+            sleep 1
+          done
+
           if [ -z "$URL" ]; then
-            echo "::error::Cloudflare Tunnel 启动失败"
+            echo "::error::Cloudflare Tunnel 启动失败或超时"
             cat tunnel.log
             exit 1
           fi
+          
           echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
           echo "Cloudflare Tunnel 地址：$URL"
 
