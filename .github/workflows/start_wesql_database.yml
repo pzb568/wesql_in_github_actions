@@ -124,6 +124,11 @@ jobs:
           echo "✅ 远程连接信息页面："
           echo "${{ env.S3_LINK }}"
 
+      - name: 输出快速连接命令
+        run: |
+          echo "✅ 快速连接命令 (复制并粘贴到终端):"
+          echo "mysql -h ${{ env.HOST }} -P ${{ env.PORT }} -u root -p"
+
       - name: 保持运行指定时间
         run: |
           echo "服务已启动，保持运行 ${{ github.event.inputs.keepalive_minutes }} 分钟..."
